@@ -1,5 +1,6 @@
 import tkinter as tk
-from cat_colors import CatColors, PRESETS
+from coat_painter import BODY, HEAD, TAIL, CoatPainter, leg_projection, heel_outline, coat_outline
+from cat_colors import CatColors, PRESETS, KEY_BASE, KEY_ACCENTS
 import ctypes
 from ctypes import wintypes
 import time
@@ -25,9 +26,41 @@ root.attributes('-topmost', True)
 root.configure(bg='#ff00ff')
 root.wm_attributes('-transparentcolor', '#ff00ff')
 W, H = 400, 414
-root.geometry('%dx%d+%d+%d' % (W,H,root.winfo_screenwidth()-W-45,root.winfo_screenheight()-H-85))
-c = tk.Canvas(root, width=W, height=H, bg='#ff00ff', highlightthickness=0)
-c.pack()
+colors = CatColors(root)
+
+class PetCanvas(tk.Canvas):
+    """Draw in the original pose coordinates at the selected display size."""
+    def _create(self, item_type, args, options):
+        if self.zoom != 1:
+            args = tuple(n * self.zoom for n in tk._flatten(args))
+            options = options.copy()
+            if 'width' in options:
+                options['width'] *= self.zoom
+            if 'font' in options:
+                family, size, *styles = options['font']
+                options['font'] = (family, max(1, round(size * self.zoom)), *styles)
+        return super()._create(item_type, args, options)
+
+    def photo(self, source, fur_base=None):
+        if self.zoom != 1:
+            source = source.resize(tuple(max(1, round(n * self.zoom)) for n in source.size),
+                                   Image.Resampling.LANCZOS)
+        if fur_base is not None:
+            # Windows removes only exact color-key pixels. Blend soft coat edges
+            # with fur before Tk draws them over the magenta window background.
+            alpha = source.getchannel('A')
+            fur = Image.new('RGBA', source.size, fur_base)
+            fur.alpha_composite(source)
+            fur.putalpha(alpha.point(lambda a: 255 if a >= 128 else 0))
+            source = fur
+        return ImageTk.PhotoImage(source)
+
+c = PetCanvas(root, bg='#ff00ff', highlightthickness=0)
+c.zoom = colors.size_percent / 100
+width, height = round(W*c.zoom), round(H*c.zoom)
+root.geometry('%dx%d+%d+%d' % (width,height,max(0,root.winfo_screenwidth()-width-45),
+                                max(0,root.winfo_screenheight()-height-85)))
+c.pack(fill='both', expand=True)
 ink, cream, gold = '#191a1d', '#fff5d9', '#edc95b'
 last_activity = time.monotonic()
 previous = set()
@@ -86,8 +119,8 @@ def keyrow(y, entries):
         width = units * 15.8
         keys.append((x,y,width-2,11,label,code,color))
         x += width
-white = '#fafbf7'
-blue, pink, green, orange, aqua = '#a9cdec','#edaaaa','#c3dfa5','#f3c28b','#a7ded9'
+white = KEY_BASE
+blue, pink, green, orange, aqua = KEY_ACCENTS
 keyrow(300, [('Esc',27,1.5,pink)]+[('F'+str(i),111+i,1,white) for i in range(1,13)])
 keyrow(314, [('`',192,1,white)]+[(v,ord(v),1,white) for v in '1234567890']+[('-',189,1,white),('=',187,1,white),('Back',8,2,pink)])
 keyrow(328, [('Tab',9,1.5,blue)]+[(v,ord(v),1,white) for v in 'QWERTYUIOP']+[('[',219,1,white),(']',221,1,white),('\\',220,1.5,white)])
@@ -105,7 +138,7 @@ show_keys = tk.BooleanVar(root, value=True)
 floating_keys = []
 FLOAT_SLOTS = 6
 FLOAT_SPACING = 27
-float_colors = (blue, pink, green, orange, aqua)
+float_colors = KEY_ACCENTS
 RISE_TIME, HOVER_TIME = .76, .5
 
 def add_floating_key(code, now):
@@ -141,6 +174,7 @@ def draw_floating_keys(now, chest):
     dark = colors.themes['浮字按键提示'].get()
     display_style = colors.floating_style.get()
     for born,label,color,x,y,slot in floating_keys:
+        color=colors.palette_color('浮字按键提示',color)
         end_x = chest[0]+(slot-(FLOAT_SLOTS-1)/2)*FLOAT_SPACING
         end_y = chest[1]
         progress = min(1,(now-born)/RISE_TIME)
@@ -165,11 +199,16 @@ def draw_floating_keys(now, chest):
             c.create_text(cx,cy,text=label,font=('Microsoft YaHei UI',9,'bold'),
                           fill='#ffffff' if dark else pale('#29363d',.32*(1-progress)),tags='floating_key')
             continue
+        style = dict(text=label,font=('Microsoft YaHei UI',11,'bold'),tags='floating_key')
+        if display_style == 'text':
+            c.create_text(cx+1,cy+1,fill=shade(face_color,.68),**style)
+            c.create_text(cx-1,cy-1,fill=pale(face_color,.72),**style)
+            c.create_text(cx,cy,fill=face_color,**style)
+            continue
         ink_color = {'black':'#000000','white':'#ffffff'}.get(display_style,colors.floating_ink)
         if ink_color == '#ff00ff':
             ink_color = '#fe00ff'
-        c.create_text(cx,cy,text=label,font=('Microsoft YaHei UI',11,'bold'),
-                      fill=ink_color,tags='floating_key')
+        c.create_text(cx,cy,fill=ink_color,**style)
 
 def toggle_key_display():
     floating_keys.clear()
@@ -193,7 +232,7 @@ def key_label(label, x, y, dark):
         coeff=(4*ia,4*ib,120-4*ia*40-4*ib*20,
                4*ic,4*id_,40-4*ic*40-4*id_*20)
         out=src.transform((80,40),Image.Transform.AFFINE,coeff,Image.Resampling.BICUBIC)
-        label_cache[cache_key]=ImageTk.PhotoImage(out)
+        label_cache[cache_key]=c.photo(out)
     return label_cache[cache_key]
 
 def quad(points, color, outline=''):
@@ -241,7 +280,7 @@ def volume(name, points, box, dy=0, smooth=True):
                 tone=int(12+28*diffuse+9*sheen)
                 pixels[px,py]=(tone,tone+2,tone+5,255)
         tex=tex.resize((int(x1-x0),int(y1-y0)),Image.Resampling.LANCZOS)
-        volume_cache[name]=ImageTk.PhotoImage(tex)
+        volume_cache[name]=c.photo(tex)
     c.create_image(box[0],box[1]+dy,image=volume_cache[name],anchor='nw')
 
 def round_volume(name,x,y,w,h,dy=0):
@@ -299,7 +338,7 @@ def draw_coat_shading(shapes):
         alpha=ImageChops.multiply(alpha,mask.filter(ImageFilter.MinFilter(3)))
         tint=Image.new('RGBA',size,(0,0,0,0))
         tint.putalpha(alpha)
-        coat_overlay.update(geometry=geometry,image=ImageTk.PhotoImage(tint),origin=(left,top))
+        coat_overlay.update(geometry=geometry,image=c.photo(tint),origin=(left,top))
     c.create_image(*coat_overlay['origin'],image=coat_overlay['image'],anchor='nw')
 
 def draw(now, mouse, pressed):
@@ -372,7 +411,7 @@ def draw(now, mouse, pressed):
         return (CAT_ORIGIN_X+(x-208*torso_lean*weight)*.34 + body_follow[0]*weight,
                 15+y*.34 + body_follow[1]*weight)
     # Measure height from the cat's eyes, even after the window is dragged.
-    eye_screen_y = c.winfo_rooty() + ref(390,246)[1]
+    eye_screen_y = c.winfo_rooty() + c.zoom * ref(390,246)[1]
     distance_y = mouse[1] - eye_screen_y
     pitch_target = math.copysign(min(1,max(0,abs(distance_y)-10)/140),distance_y)
     if idle or paused or gaze_key is not None:
@@ -401,9 +440,12 @@ def draw(now, mouse, pressed):
     def visible(color):
         return '#fe00ff' if color=='#ff00ff' else color
     coat=visible(colors.current['身体'])
+    artwork = painter.active()
+    if artwork:
+        coat = visible(artwork['base'])
     ginger_white=coat=='ginger_white'
     patched=coat in ('calico','ginger_white')
-    orange_tabby=coat==PRESETS['身体']['橘色']
+    orange_tabby=not artwork and coat==PRESETS['身体']['橘色']
     tabby=coat=='tabby' or orange_tabby
     white_tuxedo=coat=='tuxedo_white'
     tuxedo=coat=='tuxedo' or white_tuxedo
@@ -421,10 +463,18 @@ def draw(now, mouse, pressed):
         mouse_color=dark_color(mouse_color)
     red,green_channel,blue_channel=bytes.fromhex(face_fur[1:])
     whisker='#191919' if .2126*red+.7152*green_channel+.0722*blue_channel>135 else '#eeeee7'
-    stroke='#171717' if whisker=='#191919' else '#050505'
+    eye_outline='#171717' if whisker=='#191919' else '#050505'
+    stroke=coat_outline(artwork['base']) if artwork else eye_outline
     turn = yaw/math.radians(3.3)
+    root_x,root_y=TAIL[0]
+    hip_x,hip_y=ref(root_x,root_y)
+    rest_x,rest_y=ref(root_x,root_y,tilt=False)
     def tail_point(x,y):
         px,py=ref(x,y,tilt=False)
+        # Keep the root tucked behind the leaning hip; taper the shift towards the tip.
+        anchor=mouse_lean*max(0,min(1,(TAIL[-1][0]-x)/(TAIL[-1][0]-root_x)))
+        px+=(hip_x-rest_x-6)*anchor
+        py+=(hip_y-rest_y)*anchor
         bend=((x-565)/214)**2*turn
         return px+2*bend,py-bend
 
@@ -436,11 +486,13 @@ def draw(now, mouse, pressed):
         return px+1.4*height*turn,py+.8*height*turn*side
 
     # Tail, broad pear-shaped torso, and tucked white hind toes.
-    tail=[n for x,y in [(565,690),(633,692),(670,672),(702,613),(745,567),(779,560)] for n in tail_point(x,y)]
+    tail=[n for x,y in TAIL for n in tail_point(x,y)]
     if stroke:
         c.create_line(*tail,fill=stroke,width=22,smooth=True,capstyle=tk.ROUND)
     tail_fur={'calico':'#151515','ginger_white':patch_color}.get(coat,flat)
     c.create_line(*tail,fill=tail_fur,width=19,smooth=True,capstyle=tk.ROUND)
+    if artwork:
+        painter.render('tail', tail_point)
     if tuxedo:
         c.create_line(*tail_point(758,566),*tail_point(779,560),
                       fill=white_fur,width=18,capstyle=tk.ROUND)
@@ -450,21 +502,14 @@ def draw(now, mouse, pressed):
             c.create_line(*tail_point(*a),*tail_point(*b),fill=band,width=17,capstyle=tk.BUTT)
         if tabby:
             c.create_line(*tail_point(757,567),*tail_point(779,560),fill=stripe,width=18,capstyle=tk.ROUND)
-    body_shape=[(240,359),(307,331),(472,331),(536,367),(558,441),
-             (590,549),(601,650),(588,744),(561,786),(521,812),
-             (451,829),(320,829),(241,797),(204,767),(181,705),
-             (177,631),(188,548),(211,454)]
-    head_shape=[(225,215),(225,153),(234,105),(247,77),(267,77),
-             (298,103),(330,137),(369,129),(410,129),(445,138),
-             (474,104),(504,77),(524,76),(541,105),(548,154),
-             (549,214),(566,251),(575,288),(569,322),(550,354),
-             (530,374),(481,390),(391,397),(303,390),(251,371),
-             (224,340),(208,305),(206,269),(214,238)]
+    body_shape, head_shape = BODY, HEAD
     # Put both silhouettes' borders beneath both fills, hiding their common seam.
     if stroke:
         contour(body_shape,flat,width=1.6)
         contour(head_shape,face_fur,width=1.6,project_point=face)
     torso_item = contour(body_shape,flat)
+    if artwork:
+        painter.render('body', ref)
     if white_tuxedo:
         # The bib widens at both shoulders, then narrows between the hind paws.
         contour([(249,370),(310,344),(435,343),(502,367),(524,432),
@@ -498,12 +543,12 @@ def draw(now, mouse, pressed):
                          (390+side*(outer-62),height+31),(390+side*(outer-92),height+44),
                          (390+side*(outer-58),height+17),(390+side*(outer-16),height-5)],stripe)
     for heel_x in (250,528):
-        outline=[(heel_x+dx,812+dy) for dx,dy in
-                 [(-40,-13),(-29,-35),(4,-40),(34,-25),(41,0),
-                  (32,25),(13,39),(-14,39),(-34,26),(-43,7)]]
+        outline=heel_outline(heel_x)
         # The black foot covers the upper rim and leaves a sliver along the sole.
-        contour(outline,'#eeeDE8',width=1.5,project_point=hind_paw_point)
+        contour(outline,flat if artwork else '#eeeDE8',width=1.5,project_point=hind_paw_point)
         contour([(x,y-5) for x,y in outline],toe_fur,project_point=hind_paw_point)
+        if artwork:
+            painter.render(str(heel_x), hind_paw_point)
     # One continuous head-and-ears outline, without inner ears or a nose.
     contour(head_shape,face_fur,project_point=face)
     if tuxedo:
@@ -532,6 +577,8 @@ def draw(now, mouse, pressed):
                 contour([(390+side*167,y),(390+side*149,y+12),
                          (390+side*105,y+24),(390+side*132,y+8),
                          (390+side*158,y-6)],stripe,project_point=face)
+    if artwork:
+        painter.render('head', face)
     if colors.body_shadow.get():
         draw_coat_shading(([ref(x,y) for x,y in body_shape],[face(x,y) for x,y in head_shape]))
     blink = idle or (now % 5.5 < .13)
@@ -551,15 +598,15 @@ def draw(now, mouse, pressed):
             slant=(1 if ex==316 else -1)*4 if reaction=='annoyed' else 0
             curve=1 if reaction=='annoyed' else -5
             coords=(x-eye_width+2,y-slant,x,y+curve,x+eye_width-2,y+slant)
-            c.create_line(*coords,fill=stroke,width=5,smooth=True,capstyle=tk.ROUND)
+            c.create_line(*coords,fill=eye_outline,width=5,smooth=True,capstyle=tk.ROUND)
             c.create_line(*coords,fill=iris,width=2.5,smooth=True,capstyle=tk.ROUND)
         elif blink:
             if stroke:
-                c.create_line(x-eye_width+2,y,x,y+3,x+eye_width-2,y,fill=stroke,width=5,smooth=True,capstyle=tk.ROUND)
+                c.create_line(x-eye_width+2,y,x,y+3,x+eye_width-2,y,fill=eye_outline,width=5,smooth=True,capstyle=tk.ROUND)
             c.create_line(x-eye_width+2,y,x,y+3,x+eye_width-2,y,fill=iris,width=3,smooth=True)
         else:
             y+=1.2*eye_lowering
-            oval(x-eye_width,y-14*eye_scale,x+eye_width,y+14*eye_scale,iris,stroke,1.5)
+            oval(x-eye_width,y-14*eye_scale,x+eye_width,y+14*eye_scale,iris,eye_outline,1.5)
             dx=max(-4,min(4,(mouse[0]/max(1,root.winfo_screenwidth())-.5)*8))
             dy=2*head_pitch
             if gaze_key is not None:
@@ -592,18 +639,28 @@ def draw(now, mouse, pressed):
             c.addtag_withtag('pet_target',item)
     top=board_rect(69,292,252,95)
     bottom=[(x,y+10) for x,y in top]
-    board_layer=quad([top[0],top[1],bottom[1],bottom[0]],'#24292e' if dark else '#9ca9b0','#121518' if dark else '#77868e')
-    quad([top[0],top[3],bottom[3],bottom[0]],'#333a40' if dark else '#b2bec3','#121518' if dark else '#77868e')
-    quad(top,'#22262a' if dark else '#e9eeee','#4b5258' if dark else '#fafdfd')
-    quad(board_rect(73,296,244,87),'#101215' if dark else '#c4ced0')
+    base_color=colors.palette_color('键盘',white)
+    if base_color!=white:
+        shell=dark_color(base_color) if dark else base_color
+        front,side,edge,plate,rim,well=[shade(shell,n) for n in (.68,.78,.55,.94,1.08,.81)]
+    elif dark:
+        front,side,edge,plate,rim,well=('#24292e','#333a40','#121518','#22262a','#4b5258','#101215')
+    else:
+        front,side,edge,plate,rim,well=('#9ca9b0','#b2bec3','#77868e','#e9eeee','#fafdfd','#c4ced0')
+    board_layer=quad([top[0],top[1],bottom[1],bottom[0]],front,edge)
+    quad([top[0],top[3],bottom[3],bottom[0]],side,edge)
+    quad(top,plate,rim)
+    quad(board_rect(73,296,244,87),well)
+    cap_colors={key:colors.palette_color('键盘',key) for key in (white,)+KEY_ACCENTS}
+    if dark:
+        cap_colors={key:dark_color(value) for key,value in cap_colors.items()}
     keyboard_labels = colors.keyboard_labels.get()
     for x,y,w,h,label,code,color in sorted(keys,key=lambda k:project(k[0],k[1])[1]):
         impact = key_contact.get(code, -1)
         down = (not paused and code in key_contact and impact <= now
                 and (code in pressed or now < impact+.075))
         height = .5 if down else 6
-        if dark:
-            color=dark_color(color)
+        color=cap_colors[color]
         color = shade(color,.93) if down else color
         base=board_rect(x,y,w,h)
         quad(board_rect(x-.5,y-.5,w+1,h+1),'#383d42' if dark else '#7e8a90')
@@ -688,16 +745,7 @@ def draw(now, mouse, pressed):
         if not active:
             tx,ty=oldx+(tx-oldx)*.6,oldy+(ty-oldy)*.6
         paw_positions[side]=(tx,ty)
-        # Sample both contours along the moving leg, in shoulder-to-wrist order.
         sx,sy=start
-        vx,vy=tx-sx,ty-sy
-        length=max(1,math.hypot(vx,vy))
-        nx,ny=vy/length,-vx/length
-        edges=[[],[]]
-        for t,radius in [(0,18),(.18,17),(.48,14),(.72,12),(.94,11.5),(1,11)]:
-            radius -= (2 if side=='left' else 1)*reach
-            for edge,sign in zip(edges,(-1,1)):
-                edge.append((sx+t*vx+sign*radius*nx,sy+t*vy+sign*radius*ny))
         tag='foreleg_'+side
         lift=max(0,min(1,(rest[1]-ty)/max(1,rest[1]-sy-22)))
         extension=max(0,min(1,(ty-rest[1])/24))
@@ -707,16 +755,27 @@ def draw(now, mouse, pressed):
         # A near-semicircular underside, including when the paw is resting.
         toe_height=toe_width*(.92+.06*lift)
         toe_bottom=ty+9
+        # Sample both contours along the moving leg, in shoulder-to-wrist order.
+        vx,vy=tx-sx,ty-sy
+        length=max(1,math.hypot(vx,vy))
+        nx,ny=vy/length,-vx/length
+        edges=[[],[]]
+        for t,radius in [(0,18),(.18,17),(.48,14),(.72,12),(.94,11.5),(1,11)]:
+            radius -= (2 if side=='left' else 1)*reach
+            for edge,sign in zip(edges,(-1,1)):
+                edge.append((sx+t*vx+sign*radius*nx,sy+t*vy+sign*radius*ny))
         outline=edges[0]+[(tx,ty+3)]+edges[1][::-1]
         c.create_polygon(*[v for pt in outline for v in pt],smooth=True,
                          fill=white_fur if white_tuxedo else flat,outline='',tags=tag)
+        if artwork:
+            painter.render(side,leg_projection(side,start,(tx,ty),reach),tag)
         for edge in edges:
             if side=='left' and (leaning or reach>.05):
                 # Only ink the exposed segment. Each edge exits the curved torso
                 # at a different point as the shoulder and mouse move.
                 def inside(pt):
                     x,y=pt
-                    return torso_item in c.find_overlapping(x-.7,y-.7,x+.7,y+.7)
+                    return torso_item in c.find_overlapping(*[v*c.zoom for v in (x-.7,y-.7,x+.7,y+.7)])
                 outside=next((i for i,p in enumerate(edge) if not inside(p)),len(edge))
                 if outside==len(edge):
                     continue
@@ -743,9 +802,13 @@ def draw(now, mouse, pressed):
                 edge=[(x+(ex-x)*trim,y+(ey-y)*trim) for x,y in edge]
             ribbon=[(x+nx*w,y+ny*w) for (x,y),w in zip(edge,widths)]
             ribbon+=list(reversed([(x-nx*w,y-ny*w) for (x,y),w in zip(edge,widths)]))
-            c.create_polygon(*[v for pt in ribbon for v in pt],smooth=True,fill='#a6a69f',tags=tag)
-        draw_paw(tx,toe_bottom,toe_width,toe_height,tag,toe_fur,stroke if whisker=='#191919' else '',
-                 stripe if tabby else '#f6f5ed',wide_tip=orange_tabby)
+            c.create_polygon(*[v for pt in ribbon for v in pt],smooth=True,fill=flat if artwork else '#a6a69f',tags=tag)
+        draw_paw(tx,toe_bottom,toe_width,toe_height,tag,toe_fur,stroke if artwork or whisker=='#191919' else '',
+                 flat if artwork else stripe if tabby else '#f6f5ed',wide_tip=orange_tabby)
+        if artwork:
+            center = 331 if side=='left' else 447
+            painter.render(side+'_paw', lambda x,y: (tx+(x-center)*.34*toe_width/13,
+                toe_bottom + ((y-831)*.34-9)*toe_height/(13*.92)), tag)
         if side=='right' and reach>.5 and not active:
             c.tag_lower(tag,board_layer)
     if colors.click_marks.get() and not paused:
@@ -880,12 +943,52 @@ def toggle_pause():
     global paused
     paused=not paused
 
-colors=CatColors(root)
+size_dialog = None
+
+def resize_pet(value):
+    percent = int(float(value))
+    if percent == colors.size_percent:
+        return
+    width, height = round(W*percent/100), round(H*percent/100)
+    # Keep the keyboard's bottom edge and horizontal center in place.
+    x = root.winfo_x() + (root.winfo_width()-width)//2
+    y = root.winfo_y() + root.winfo_height()-height
+    left, top, desktop_w, desktop_h = (user32.GetSystemMetrics(i) for i in (76,77,78,79))
+    x = max(left, min(x, left+desktop_w-width))
+    y = max(top, min(y, top+desktop_h-height))
+    colors.size_percent = percent
+    c.zoom = percent / 100
+    root.geometry('%dx%d+%d+%d' % (width,height,x,y))
+    label_cache.clear()
+    volume_cache.clear()
+    coat_overlay.clear()
+    colors.save()
+
+def open_size():
+    global size_dialog
+    if size_dialog is not None and size_dialog.winfo_exists():
+        size_dialog.lift()
+        return
+    size_dialog = tk.Toplevel(root)
+    size_dialog.title('小猫大小')
+    size_dialog.attributes('-topmost', True)
+    size_dialog.resizable(False, False)
+    slider = tk.Scale(size_dialog, label='大小（%）', from_=50, to=175,
+                      orient='horizontal', length=240, resolution=1)
+    slider.set(colors.size_percent)
+    slider.configure(command=resize_pet)
+    slider.pack(padx=14, pady=10)
+    tk.Button(size_dialog, text='恢复 100%', command=lambda: slider.set(100)).pack(pady=(0,10))
+    size_dialog.bind('<Escape>', lambda event: size_dialog.destroy())
+
+painter = CoatPainter(root, c, colors)
+colors.open_painter = painter.open
+colors.drawing_thumbnail = painter.thumbnail
 menu=tk.Menu(root,tearoff=False)
-floating_menu=colors.attach(menu)
+floating_menu=colors.attach(menu,open_size)
 floating_menu.add_checkbutton(label='显示浮字',variable=show_keys,command=toggle_key_display)
 style_menu=tk.Menu(floating_menu,tearoff=False)
-for label,value in [('彩色气泡','bubble'),('黑色文字','black'),('白色文字','white')]:
+for label,value in [('彩色气泡','bubble'),('彩色文字','text'),('黑色文字','black'),('白色文字','white')]:
     style_menu.add_radiobutton(label=label,variable=colors.floating_style,value=value,command=colors.save)
 style_menu.add_command(label='自定义文字 RGB…',command=colors.choose_floating_ink)
 style_menu.add_radiobutton(label='带底色的小键帽',variable=colors.floating_style,
