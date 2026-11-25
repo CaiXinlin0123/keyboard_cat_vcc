@@ -20,6 +20,7 @@ HEAD=[(225,215),(225,153),(234,105),(247,77),(267,77),
              (224,340),(208,305),(206,269),(214,238)]
 
 TAIL = [(565,690),(633,692),(670,672),(702,613),(745,567),(779,560)]
+BOB_X, BOB_Y, BOB_RADIUS = 606, 690, 27
 SIZE = (352, 420)
 LAYERS = ('tail','body','250','528','head','left','left_paw','right','right_paw')
 
@@ -87,7 +88,7 @@ def tail_path():
     return left+right[::-1]
 
 
-def atlas(show_legs=True):
+def atlas(show_legs=True,short_tail=False):
     # Each pixel belongs to the foremost visible piece of fur in the resting pose.
     ids=Image.new('L', SIZE)
     d=ImageDraw.Draw(ids)
@@ -95,9 +96,12 @@ def atlas(show_legs=True):
         d.polygon([pixel(x,y) for x,y in spline(points)],fill=LAYERS.index(part)+1)
     def disc(x,y,rx,ry,part):
         d.ellipse([pixel(x-rx,y-ry),pixel(x+rx,y+ry)],fill=LAYERS.index(part)+1)
-    d.polygon(tail_path(),fill=1)
-    for x,y in (TAIL[0],TAIL[-1]):
-        disc(x,y,28,28,'tail')
+    if short_tail:
+        disc(BOB_X,BOB_Y,BOB_RADIUS,BOB_RADIUS,'tail')
+    else:
+        d.polygon(tail_path(),fill=1)
+        for x,y in (TAIL[0],TAIL[-1]):
+            disc(x,y,28,28,'tail')
     polygon(BODY,'body')
     for x in (250,528):
         polygon([(u,v-5) for u,v in heel_outline(x)],str(x))
@@ -116,13 +120,17 @@ def atlas(show_legs=True):
     return ids
 
 
-def forepaw_guide(ids):
-    # Use the same visible regions that attach paint to the moving forelegs.
+def outline_guide(ids,parts,adjacent_to=None):
+    # Trace the exact regions that attach paint to each moving body part.
     guide=Image.new('RGBA',ids.size)
-    for part in ('left','left_paw','right','right_paw'):
+    for part in parts:
         region=ids.point(lambda n:255 if n==LAYERS.index(part)+1 else 0)
         inner=ImageChops.subtract(region,region.filter(ImageFilter.MinFilter(3)))
         outer=ImageChops.subtract(region.filter(ImageFilter.MaxFilter(3)),region)
+        if adjacent_to is not None:
+            neighbor=ids.point(lambda n:255 if n==LAYERS.index(adjacent_to)+1 else 0)
+            inner=ImageChops.darker(inner,neighbor.filter(ImageFilter.MaxFilter(3)))
+            outer=ImageChops.darker(outer,neighbor)
         guide.paste((252,252,250,170),mask=outer)
         guide.paste((43,48,54,190),mask=inner)
     return guide
@@ -175,44 +183,65 @@ def encode_texture(image):
 
 
 class CoatPainter:
-    def __init__(self,root,canvas,settings):
+    def __init__(self,root,canvas,settings,make_preview=None):
         self.root,self.canvas,self.settings=root,canvas,settings
         self.window=None
         self.record=None
-        self.ids=atlas()
+        self.images={}
+        self.parts={}
+        self.make_preview=make_preview
+        self.preview_redraw=None
+        self.preview_pending=None
+        self.set_tail_shape()
+
+    def set_tail_shape(self):
+        short=self.settings.short_tail.get()
+        self.ids=atlas(short_tail=short)
         self.outside=self.ids.point(lambda n: 255 if n==0 else 0)
         silhouette=ImageChops.invert(self.outside)
         self.paint_area=silhouette.filter(ImageFilter.MinFilter(5))
         self.outer_rim=ImageChops.subtract(silhouette,self.paint_area)
-        self.body_ids=atlas(show_legs=False)
+        self.body_ids=atlas(show_legs=False,short_tail=short)
         self.body_mask=self.body_ids.point(lambda n:255 if n else 0)
         self.body_area=self.body_mask.filter(ImageFilter.MinFilter(5))
         self.body_rim=ImageChops.subtract(self.body_mask,self.body_area)
         self.forelegs=self.ids.point(lambda n:255 if n>=LAYERS.index('left')+1 else 0)
-        self.images={}
-        self.parts={}
+        self.record=None
+        self.parts.clear()
+        self.images.clear()
+        if self.window and self.window.winfo_exists():
+            self.tail_guide_pixels=outline_guide(self.ids,('tail',),adjacent_to='body')
+            self.display_size=(0,0)
+            self.refresh()
 
     def active(self):
         record=self.settings.active_drawing()
         if record is not self.record:
-            self.record=record
-            self.parts.clear()
-            self.images.clear()
             if record:
                 paint=texture(record)
                 underneath=texture(record,'underpaint') if record.get('underpaint') else None
-                for i,part in enumerate(LAYERS,1):
-                    mask=ImageChops.darker(self.paint_area,self.ids.point(lambda n:255 if n==i else 0))
-                    layer=Image.new('RGBA',SIZE)
-                    layer.paste(paint,mask=mask)
-                    if underneath is not None and i<=LAYERS.index('left'):
-                        region=self.body_ids.point(lambda n:255 if n==i else 0)
-                        covered=ImageChops.darker(self.forelegs,ImageChops.darker(region,self.body_area))
-                        layer.paste(underneath,mask=covered)
-                    bounds=layer.getbbox()
-                    if bounds:
-                        self.parts[part]=(bounds,layer.crop(bounds))
+                self.set_artwork(record,paint,underneath)
+            else:
+                self.record=None
+                self.parts.clear()
+                self.images.clear()
         return record
+
+    def set_artwork(self,record,paint,underneath):
+        self.record=record
+        self.parts.clear()
+        self.images.clear()
+        for i,part in enumerate(LAYERS,1):
+            mask=ImageChops.darker(self.paint_area,self.ids.point(lambda n:255 if n==i else 0))
+            layer=Image.new('RGBA',SIZE)
+            layer.paste(paint,mask=mask)
+            if underneath is not None and i<=LAYERS.index('left'):
+                region=self.body_ids.point(lambda n:255 if n==i else 0)
+                covered=ImageChops.darker(self.forelegs,ImageChops.darker(region,self.body_area))
+                layer.paste(underneath,mask=covered)
+            bounds=layer.getbbox()
+            if bounds:
+                self.parts[part]=(bounds,layer.crop(bounds))
 
     def render(self,part,project,tag=None):
         if part not in self.parts:
@@ -261,54 +290,77 @@ class CoatPainter:
             self.window.lift()
             return
         self.window=tk.Toplevel(self.root)
+        self.window.withdraw()
         self.window.title('自定义绘制')
         self.window.attributes('-topmost',True)
-        self.window.resizable(False,False)
         panel=ttk.Frame(self.window,padding=10)
-        panel.pack()
+        panel.pack(fill='both',expand=True)
+        panel.columnconfigure(0,weight=1)
+        panel.rowconfigure(2,weight=1)
         self.capacity=ttk.Label(panel)
-        self.capacity.pack(anchor='w',pady=(0,4))
-        self.choice=ttk.Combobox(panel,state='readonly',width=30)
-        self.choice.pack(fill='x',pady=(0,6))
-        self.choice.bind('<<ComboboxSelected>>',lambda e:self.load())
+        self.capacity.grid(row=0,column=0,sticky='w',pady=(0,4))
         name_row=ttk.Frame(panel)
-        name_row.pack(fill='x',pady=(0,6))
+        name_row.grid(row=1,column=0,sticky='ew',pady=(0,6))
+        self.choice=ttk.Combobox(name_row,state='readonly',width=22)
+        self.choice.pack(side='left',padx=(0,10))
+        self.choice.bind('<<ComboboxSelected>>',lambda e:self.load())
         ttk.Label(name_row,text='小猫名字').pack(side='left',padx=(0,6))
         self.name=tk.StringVar(self.window)
         ttk.Entry(name_row,textvariable=self.name).pack(side='left',fill='x',expand=True)
         workspace=ttk.Frame(panel)
-        workspace.pack(fill='x')
-        self.board=tk.Canvas(workspace,width=SIZE[0],height=SIZE[1],highlightthickness=0,
-                             cursor='crosshair')
-        self.board.pack(side='left')
+        workspace.grid(row=2,column=0,sticky='nsew')
+        workspace.columnconfigure(0,weight=1)
+        workspace.rowconfigure(0,weight=1)
+        self.board=tk.Canvas(workspace,width=round(SIZE[0]*1.75),height=round(SIZE[1]*1.75),
+                             bg='#e6e4df',highlightthickness=0,cursor='crosshair')
+        self.board.grid(row=0,column=0,sticky='nsew')
+        sidebar=ttk.Frame(workspace)
+        sidebar.grid(row=0,column=1,sticky='n',padx=(8,0))
+        if self.make_preview:
+            self.preview_redraw=self.make_preview(sidebar,self)
+            self.window.bind('<Destroy>',self.close_preview,add='+')
         self.gallery_index=tk.IntVar(self.window)
-        self.gallery=ttk.LabelFrame(workspace,text='最近保存')
+        self.gallery=ttk.LabelFrame(sidebar,text='最近保存')
         self.preview_item=self.board.create_image(0,0,anchor='nw')
-        self.guide_photo=ImageTk.PhotoImage(forepaw_guide(self.ids))
-        self.guide_item=self.board.create_image(0,0,anchor='nw',image=self.guide_photo)
+        self.guide_pixels=outline_guide(self.ids,('left','left_paw','right','right_paw'))
+        self.guide_item=self.board.create_image(0,0,anchor='nw')
+        self.head_guide_pixels=outline_guide(self.ids,('head',))
+        self.head_guide_item=self.board.create_image(0,0,anchor='nw')
+        self.tail_guide_pixels=outline_guide(self.ids,('tail',),adjacent_to='body')
+        self.tail_guide_item=self.board.create_image(0,0,anchor='nw')
+        self.display_size=(0,0)
+        self.board_origin=(0,0)
         for color,dash in (('#fafafa',()),('#565656',(4,4))):
             self.board.create_line(MIRROR_X,0,MIRROR_X,SIZE[1],fill=color,dash=dash,
                                    tags='mirror_axis',state='hidden')
         self.show_axis=tk.BooleanVar(self.window,value=False)
         self.show_forepaws=tk.BooleanVar(self.window,value=True)
+        self.show_head_guide=tk.BooleanVar(self.window,value=True)
+        self.show_tail_guide=tk.BooleanVar(self.window,value=True)
         modes=ttk.Frame(panel)
-        modes.pack(fill='x',pady=(6,0))
+        modes.grid(row=3,column=0,sticky='ew',pady=(6,0))
         self.mode=tk.StringVar(self.window,value='pen')
         self.symmetric=tk.BooleanVar(self.window,value=False)
         for label,value in [('画笔','pen'),('吸管','pick'),('橡皮擦','erase')]:
             ttk.Radiobutton(modes,text=label,variable=self.mode,value=value).pack(side='left',padx=2)
         ttk.Checkbutton(modes,text='左右对称',variable=self.symmetric).pack(side='right')
         view=ttk.Frame(panel)
-        view.pack(fill='x')
+        view.grid(row=4,column=0,sticky='ew')
         self.show_legs=tk.BooleanVar(self.window,value=True)
         ttk.Checkbutton(view,text='显示前腿',variable=self.show_legs,command=self.refresh).pack(side='left')
         self.guide_toggle=ttk.Checkbutton(view,text='前脚参考线',variable=self.show_forepaws,command=self.refresh)
         self.guide_toggle.pack(side='left')
+        ttk.Checkbutton(view,text='头部轮廓线',variable=self.show_head_guide,
+                        command=lambda:self.board.itemconfigure(self.head_guide_item,
+                            state='normal' if self.show_head_guide.get() else 'hidden')).pack(side='left')
+        ttk.Checkbutton(view,text='尾根分界线',variable=self.show_tail_guide,
+                        command=lambda:self.board.itemconfigure(self.tail_guide_item,
+                            state='normal' if self.show_tail_guide.get() else 'hidden')).pack(side='left')
         ttk.Checkbutton(view,text='中轴辅助线',variable=self.show_axis,
                         command=lambda:self.board.itemconfigure('mirror_axis',
                             state='normal' if self.show_axis.get() else 'hidden')).pack(side='right')
         tools=ttk.Frame(panel)
-        tools.pack(fill='x',pady=6)
+        tools.grid(row=5,column=0,sticky='ew',pady=4)
         self.ink='#db8845'
         self.pen_button=tk.Button(tools,text='画笔 RGB',bg=self.ink,command=self.pick_pen)
         self.pen_button.pack(side='left')
@@ -317,7 +369,7 @@ class CoatPainter:
         tk.Scale(tools,from_=1,to=28,variable=self.radius,orient='horizontal',length=115,
                  label='笔刷大小').pack(side='right')
         actions=ttk.Frame(panel)
-        actions.pack(fill='x')
+        actions.grid(row=6,column=0,sticky='ew')
         ttk.Button(actions,text='撤销一笔',command=self.undo).pack(side='left')
         self.delete_button=ttk.Button(actions,text='删除这只',command=self.delete_selected)
         self.delete_button.pack(side='left',padx=4)
@@ -327,6 +379,15 @@ class CoatPainter:
         self.board.bind('<ButtonRelease-1>',lambda e:setattr(self,'last',None))
         active=self.settings.active_drawing()
         self.refresh_history(self.settings.drawings.index(active)+1 if active else 0)
+        self.board.bind('<Configure>',lambda event:self.display_board(event.width,event.height))
+        self.window.update_idletasks()
+        width=min(self.window.winfo_reqwidth(),self.window.winfo_screenwidth()-40)
+        height=min(self.window.winfo_reqheight(),self.window.winfo_screenheight()-100)
+        self.window.geometry(f'{width}x{height}')
+        controls_height=self.window.winfo_reqheight()-workspace.winfo_reqheight()
+        self.window.minsize(min(width,sidebar.winfo_reqwidth()+240),
+                            min(height,controls_height+sidebar.winfo_reqheight()))
+        self.window.deiconify()
 
     def refresh_history(self,selection):
         history=self.settings.drawings
@@ -337,7 +398,7 @@ class CoatPainter:
             child.destroy()
         self.thumbnails=[]
         if history:
-            self.gallery.pack(side='left',anchor='n',padx=(8,0))
+            self.gallery.pack(fill='x',pady=(6,0))
         else:
             self.gallery.pack_forget()
         for index,item in enumerate(history,1):
@@ -345,7 +406,7 @@ class CoatPainter:
             self.thumbnails.append(image)
             tk.Radiobutton(self.gallery,image=image,indicatoron=False,variable=self.gallery_index,
                            value=index,command=self.select_thumbnail).grid(
-                               row=(index-1)//2,column=(index-1)%2,padx=2,pady=2)
+                               row=(index-1)//5,column=(index-1)%5,padx=2,pady=2)
         self.load()
 
     def delete_selected(self):
@@ -413,8 +474,49 @@ class CoatPainter:
         self.preview_pixels=self.compose(self.base,paint,body_only=not show)
         self.board.itemconfigure(self.guide_item,state='normal' if show and self.show_forepaws.get() else 'hidden')
         self.guide_toggle.state(['!disabled'] if show else ['disabled'])
-        self.preview=ImageTk.PhotoImage(self.preview_pixels)
+        self.display_board(self.board.winfo_width(),self.board.winfo_height())
+        if self.preview_redraw and self.preview_pending is None:
+            self.preview_pending=self.window.after_idle(self.refresh_pose)
+
+    def display_board(self,width,height):
+        if min(width,height)<=1:
+            return
+        scale=min(width/SIZE[0],height/SIZE[1])
+        size=(max(1,round(SIZE[0]*scale)),max(1,round(SIZE[1]*scale)))
+        left,top=(width-size[0])//2,(height-size[1])//2
+        self.board_origin=(left,top)
+        if size!=self.display_size:
+            self.display_size=size
+            self.guide_photo=ImageTk.PhotoImage(self.guide_pixels.resize(size,Image.Resampling.NEAREST))
+            self.board.itemconfigure(self.guide_item,image=self.guide_photo)
+            self.head_guide_photo=ImageTk.PhotoImage(self.head_guide_pixels.resize(size,Image.Resampling.NEAREST))
+            self.board.itemconfigure(self.head_guide_item,image=self.head_guide_photo)
+            self.tail_guide_photo=ImageTk.PhotoImage(self.tail_guide_pixels.resize(size,Image.Resampling.NEAREST))
+            self.board.itemconfigure(self.tail_guide_item,image=self.tail_guide_photo)
+        self.preview=ImageTk.PhotoImage(self.preview_pixels.resize(size,Image.Resampling.NEAREST))
         self.board.itemconfigure(self.preview_item,image=self.preview)
+        for item in (self.preview_item,self.guide_item,self.head_guide_item,self.tail_guide_item):
+            self.board.coords(item,left,top)
+        axis=left+(MIRROR_X+.5)*size[0]/SIZE[0]
+        for line in self.board.find_withtag('mirror_axis'):
+            self.board.coords(line,axis,top,axis,top+size[1])
+
+    def paint_point(self,event):
+        left,top=self.board_origin
+        width,height=self.display_size
+        return (math.floor((event.x-left+.5)*SIZE[0]/width),
+                math.floor((event.y-top+.5)*SIZE[1]/height))
+
+    def refresh_pose(self):
+        self.preview_pending=None
+        self.preview_redraw()
+
+    def close_preview(self,event):
+        if event.widget is self.window:
+            if self.preview_pending is not None:
+                self.window.after_cancel(self.preview_pending)
+                self.preview_pending=None
+            self.preview_redraw=None
 
     def use_ink(self,color):
         self.ink=color
@@ -433,22 +535,24 @@ class CoatPainter:
             self.refresh()
 
     def begin(self,event):
+        x,y=self.paint_point(event)
+        self.last=None
+        if not (0<=x<SIZE[0] and 0<=y<SIZE[1]):
+            return
         if self.mode.get()=='pick':
-            self.last=None
-            x,y=event.x,event.y
             ids=self.ids if self.show_legs.get() else self.body_ids
-            if 0<=x<SIZE[0] and 0<=y<SIZE[1] and ids.getpixel((x,y)):
+            if ids.getpixel((x,y)):
                 self.use_ink('#%02x%02x%02x'%self.preview_pixels.getpixel((x,y)))
             return
         self.undo_stack.append((self.paint.copy(),self.underpaint.copy()))
         self.undo_stack=self.undo_stack[-24:]
-        self.last=(event.x,event.y)
+        self.last=(x,y)
         self.move(event)
 
     def move(self,event):
         if self.last is None:
             return
-        x,y=event.x,event.y
+        x,y=self.paint_point(event)
         r=self.radius.get()
         mask=Image.new('L',SIZE)
         brush=ImageDraw.Draw(mask)
@@ -476,6 +580,49 @@ class CoatPainter:
             self.paint,self.underpaint=self.undo_stack.pop()
             self.refresh()
 
+    def choose_replacement(self,drawings):
+        dialog=tk.Toplevel(self.window)
+        dialog.title('选择要替换的小猫')
+        dialog.transient(self.window)
+        dialog.resizable(False,False)
+        panel=ttk.Frame(dialog,padding=10)
+        panel.pack()
+        ttk.Label(panel,text=f'已保存 {MAX_DRAWINGS} 只小猫，请选择一只替换。').pack(anchor='w')
+        gallery=ttk.Frame(panel)
+        gallery.pack(pady=6)
+        selected=tk.IntVar(dialog,value=-1)
+        replacement=None
+
+        def confirm():
+            nonlocal replacement
+            index=selected.get()
+            if 0<=index<len(drawings):
+                replacement=drawings[index]
+                dialog.destroy()
+
+        actions=ttk.Frame(panel)
+        actions.pack(fill='x')
+        cancel=ttk.Button(actions,text='取消',command=dialog.destroy)
+        cancel.pack(side='left')
+        replace=ttk.Button(actions,text='替换并保存',command=confirm,state='disabled')
+        replace.pack(side='right')
+        for i,cat in enumerate(drawings):
+            image=self.thumbnail(cat,(53,63))
+            button=tk.Radiobutton(gallery,text=cat['name'],image=image,compound='top',indicatoron=False,
+                                  width=94,value=i,variable=selected,command=lambda:replace.state(['!disabled']))
+            button.image=image
+            button.grid(row=i//5,column=i%5,padx=2,pady=2)
+        dialog.bind('<Escape>',lambda event:dialog.destroy())
+        dialog.update_idletasks()
+        width,height=dialog.winfo_reqwidth(),dialog.winfo_reqheight()
+        x=self.window.winfo_rootx()+(self.window.winfo_width()-width)//2
+        y=self.window.winfo_rooty()+(self.window.winfo_height()-height)//2
+        dialog.geometry(f'+{x}+{y}')
+        dialog.grab_set()
+        cancel.focus_set()
+        self.window.wait_window(dialog)
+        return replacement
+
     def commit(self):
         png=encode_texture(self.paint)
         name=self.name.get().strip() or datetime.now().strftime('%m-%d %H:%M:%S')
@@ -489,7 +636,12 @@ class CoatPainter:
         others=[a for a in self.settings.drawings if not (same_art and a is original)
                 and (a['name'],a['base'],a['png'],a.get('underpaint'))!=(name,self.base,png,record.get('underpaint'))]
         previous=self.settings.drawings
-        self.settings.drawings=[record]+others[:MAX_DRAWINGS-1]
+        if len(others)>=MAX_DRAWINGS:
+            replacement=self.choose_replacement(others)
+            if replacement is None:
+                return
+            others=[cat for cat in others if cat is not replacement]
+        self.settings.drawings=[record]+others
         if self.settings.use_drawing(record):
             self.window.destroy()
         else:

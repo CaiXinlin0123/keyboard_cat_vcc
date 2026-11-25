@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-MAX_DRAWINGS = 10
+MAX_DRAWINGS = 20
 MAX_PALETTES = 3
 KEY_BASE = '#fafbf7'
 KEY_ACCENTS = ('#a9cdec','#edaaaa','#c3dfa5','#f3c28b','#a7ded9')
@@ -92,6 +92,7 @@ class CatColors:
         self.floating_ink = custom_ink if is_rgb(custom_ink) else '#303030'
         self.keyboard_labels = tk.BooleanVar(root, value=data.get('keyboard_labels') is not False)
         self.body_shadow = tk.BooleanVar(root, value=data.get('body_shadow') is True)
+        self.short_tail = tk.BooleanVar(root, value=data.get('short_tail') is True)
         self.sync_themes = tk.BooleanVar(root, value=data.get('sync_themes') is not False)
         stored=data.get('palettes',{})
         self.palettes={}
@@ -188,6 +189,7 @@ class CatColors:
         data['floating_ink'] = self.floating_ink
         data['keyboard_labels'] = self.keyboard_labels.get()
         data['body_shadow'] = self.body_shadow.get()
+        data['short_tail'] = self.short_tail.get()
         data['sync_themes'] = self.sync_themes.get()
         data['themes'] = {part: theme.get() for part,theme in self.themes.items()}
         data['palettes'] = self.palettes
@@ -223,8 +225,8 @@ class CatColors:
             self.fill_menu(part)
         keyboard = tk.Menu(custom, tearoff=False)
         custom.add_cascade(label='键盘', menu=keyboard)
-        keyboard.add_checkbutton(label='显示按键',variable=self.keyboard_labels,command=self.save)
         keyboard.add_command(label='自定义绘制',command=lambda:self.edit_palette('键盘'))
+        keyboard.add_checkbutton(label='显示按键',variable=self.keyboard_labels,command=self.save)
         self.add_theme(keyboard, '键盘')
         floating = tk.Menu(custom, tearoff=False)
         custom.add_cascade(label='浮字按键提示', menu=floating)
@@ -386,20 +388,28 @@ class CatColors:
         def choice(label, color):
             sub.add_radiobutton(label=label, value=color, variable=self.variables[part],
                                 command=lambda: self.select(part,color))
-        for label,color in PRESETS[part].items():
-            choice(label,color)
         def choose():
             current = self.current[part]
             self.select(part,pick_rgb(self.root, current if is_rgb(current) else '#f3f1eb', self.history[part]))
+        if part == '身体':
+            if self.open_painter:
+                sub.add_command(label='自定义绘制', command=self.open_painter)
+        elif part == '鼠标':
+            sub.add_command(label='自定义绘制',command=lambda:self.edit_palette(part))
+        else:
+            sub.add_command(label='自定义绘制',command=choose)
+        for label,color in PRESETS[part].items():
+            choice(label,color)
         sub.add_separator()
         if part == '眼睛':
             sub.add_cascade(label='瞳孔', menu=self.menus['瞳孔'])
             sub.add_separator()
         if part == '身体':
-            if self.open_painter:
-                sub.add_command(label='自定义绘制', command=self.open_painter)
             for label,value in [('无阴影',0),('有阴影',1)]:
                 sub.add_radiobutton(label=label, variable=self.body_shadow, value=value, command=self.save)
+            sub.add_separator()
+            for label,value in [('长尾巴',0),('短尾巴',1)]:
+                sub.add_radiobutton(label=label, variable=self.short_tail, value=value, command=self.save)
             sub.add_separator()
             sub.add_command(label='最近使用的自定义小猫',state='disabled')
             self.menu_thumbnails.clear()
@@ -413,12 +423,9 @@ class CatColors:
                                 **image_options)
             return
         if part == '鼠标':
-            sub.add_command(label='自定义绘制',command=lambda:self.edit_palette(part))
             self.add_theme(sub, part)
             sub.add_checkbutton(label='点击拟声线',variable=self.click_marks,command=self.save)
-        else:
-            sub.add_command(label='自定义绘制' if part == '眼睛' else '自定义 RGB…', command=choose)
-        sub.add_separator()
+            sub.add_separator()
         sub.add_command(label='最近使用的自定义颜色', state='disabled')
         for color in self.history[part]:
             choice(color.upper(),color)

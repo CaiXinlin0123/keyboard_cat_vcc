@@ -1,5 +1,6 @@
 import tkinter as tk
-from coat_painter import BODY, HEAD, TAIL, CoatPainter, leg_projection, heel_outline, coat_outline
+from tkinter import ttk
+from coat_painter import BODY, HEAD, TAIL, BOB_X, BOB_Y, BOB_RADIUS, CoatPainter, leg_projection, heel_outline, coat_outline
 from cat_colors import CatColors, PRESETS, KEY_BASE, KEY_ACCENTS
 import ctypes
 from ctypes import wintypes
@@ -9,6 +10,7 @@ import argparse
 import random
 from pathlib import Path
 from functools import lru_cache
+from dataclasses import dataclass, field
 from collections import deque
 import os
 from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageFilter, ImageChops
@@ -83,49 +85,56 @@ root.geometry('%dx%d+%d+%d' % (width,height,max(0,root.winfo_screenwidth()-width
                                 max(0,root.winfo_screenheight()-height-85)))
 c.pack(fill='both', expand=True)
 ink, cream, gold = '#191a1d', '#fff5d9', '#edc95b'
-last_activity = time.monotonic()
-previous = set()
-targets = {'left':(145,320), 'right':(225,320)}
-until = {'left':0, 'right':0}
 STROKE_TIME = .22
 CONTACT_TIME = .14
-stroke_start = {'left':-10., 'right':-10.}
-stroke_speed = {'left':0., 'right':0.}
-stroke_key = {'left':None, 'right':None}
-stroke_origin = {'left':(0,0), 'right':(0,0)}
-key_contact = {}
+SLEEP_AFTER = 20
+CAT_ORIGIN_X = 42
+paw_rest = {"left":(CAT_ORIGIN_X+331*.34,297.54),"right":(CAT_ORIGIN_X+447*.34,297.54)}
+
+@dataclass
+class PetPose:
+    last_activity: float = field(default_factory=time.monotonic)
+    mouse_work_until: float = 0
+    mouse_blocked: bool = False
+    mouse_active_until: float = 0
+    last_key_time: float = 0
+    mouse_offset: tuple = (0.,0.)
+    mouse_lean: float = 0
+    look_turn: float = 0
+    head_pitch: float = 0
+    eye_lowering: float = 0
+    face_gaze_x: float = 0
+    typing_balance: float = 0
+    body_follow: tuple = (0.,0.)
+    expression: str = ''
+    expression_start: float = 0
+    paused: bool = False
+    drag: dict = None
+    paw_positions: dict = field(default_factory=paw_rest.copy)
+    targets: dict = field(default_factory=lambda:{'left':(145,320),'right':(225,320)})
+    until: dict = field(default_factory=lambda:dict.fromkeys(paw_rest,0))
+    stroke_start: dict = field(default_factory=lambda:dict.fromkeys(paw_rest,-10.))
+    stroke_speed: dict = field(default_factory=lambda:dict.fromkeys(paw_rest,0.))
+    stroke_key: dict = field(default_factory=lambda:dict.fromkeys(paw_rest))
+    stroke_origin: dict = field(default_factory=paw_rest.copy)
+    key_contact: dict = field(default_factory=dict)
+    pressed_until: dict = field(default_factory=dict)
+    click_started: dict = field(default_factory=dict)
+
+live = PetPose()
+previous = set()
 last_mouse = None
-mouse_offset = (0.0, 0.0)
 
 def move_mini_mouse(offset, dx, dy):
     # The seated cat faces the user: its forward and right are screen-down and left.
     gain = .11
     return (max(-14, min(10, offset[0] - gain * dx)),
             max(-12, min(12, offset[1] - gain * dy)))
-mouse_active_until = 0
-mouse_work_until = 0
-click_started = {}
-last_key_time = 0
-CAT_ORIGIN_X = 42
-paw_rest = {"left":(CAT_ORIGIN_X+331*.34,297.54),"right":(CAT_ORIGIN_X+447*.34,297.54)}
-paw_positions = paw_rest.copy()
-mouse_lean = 0.0
-look_turn = 0.0
-head_pitch = 0.0
-eye_lowering = 0.0
-face_gaze_x = 0.0
-typing_balance = 0.0
-body_follow = (0.0, 0.0)
-drag = None
 pet_count = 0
 last_pet = -10.0
-expression = ''
-expression_start = 0.0
 ANGER_DURATION = 2.4
-paused = False
 keys = []
-pressed_until = {}
-label_cache = {}
+c.label_cache = {}
 volume_cache = {}
 windows_fonts = Path(os.environ['WINDIR']) / 'Fonts'
 for font_name in ('msyh.ttc', 'segoeui.ttf', 'arial.ttf'):
@@ -238,7 +247,8 @@ def toggle_key_display():
     c.delete('floating_key')
     floating_menu.entryconfigure('浮字样式', state='normal' if show_keys.get() else 'disabled')
 
-def key_label(label, x, y, dark):
+def key_label(c,label, x, y, dark):
+    label_cache = c.label_cache
     cache_key = (label, x, y, dark)
     if cache_key not in label_cache:
         # Render small type at 4x resolution, then map its plane using the
@@ -258,7 +268,7 @@ def key_label(label, x, y, dark):
         label_cache[cache_key]=c.photo(out)
     return label_cache[cache_key]
 
-def quad(points, color, outline=''):
+def quad(c,points, color, outline=''):
     return c.create_polygon(*[n for point in points for n in point],fill=color,outline=outline,width=1)
 
 def shade(color, factor):
@@ -267,7 +277,7 @@ def shade(color, factor):
 def board_rect(x,y,w,h,z=0):
     return [project(x,y,z),project(x+w,y,z),project(x+w,y+h,z),project(x,y+h,z)]
 
-def oval(x1,y1,x2,y2,fill,outline='',width=1):
+def oval(c,x1,y1,x2,y2,fill,outline='',width=1):
     return c.create_oval(x1,y1,x2,y2,fill=fill,outline=outline,width=width)
 
 def volume(name, points, box, dy=0, smooth=True):
@@ -311,7 +321,7 @@ def round_volume(name,x,y,w,h,dy=0):
              y+h/2+math.sin(i*math.pi/24)*h/2) for i in range(48)]
     volume(name,points,(x,y,x+w,y+h),dy,smooth=False)
 
-def draw_paw(x,bottom,w,h,tag,fur,stroke,tip_color,wide_tip=False):
+def draw_paw(c,x,bottom,w,h,tag,fur,stroke,tip_color,wide_tip=False):
     c.create_oval(x-w,bottom-2*h,x+w,bottom,fill=fur,outline='',tags=tag)
     outer,inner=[],[]
     for degrees in range(0,181,3):
@@ -331,11 +341,12 @@ def draw_paw(x,bottom,w,h,tag,fur,stroke,tip_color,wide_tip=False):
         c.create_line(*[v for point in outer for v in point],fill=stroke,
                       width=1.5,smooth=True,capstyle=tk.ROUND,tags=tag)
 
-coat_overlay = {}
+c.coat_overlay = {}
 
-def draw_coat_shading(shapes):
+def draw_coat_shading(c,shapes):
     # Match Tk's closed quadratic splines. Blur the combined silhouette so the
     # neck and patch boundaries stay continuous as the head and shoulders move.
+    coat_overlay = c.coat_overlay
     geometry = tuple(tuple((round(x),round(y)) for x,y in shape) for shape in shapes)
     if geometry != coat_overlay.get('geometry'):
         points = [p for shape in geometry for p in shape]
@@ -364,6 +375,20 @@ def draw_coat_shading(shapes):
         coat_overlay.update(geometry=geometry,image=c.photo(tint),origin=(left,top))
     c.create_image(*coat_overlay['origin'],image=coat_overlay['image'],anchor='nw')
 
+TOYS = ('paper', 'bubble', 'wand', 'box')
+
+
+def ramp(value):
+    t = max(0., min(1., value))
+    return t*t*(3-2*t)
+
+
+def passes_near(a, b, center, radius):
+    dx, dy = b[0]-a[0], b[1]-a[1]
+    t = max(0., min(1., ((center[0]-a[0])*dx+(center[1]-a[1])*dy)/max(1., dx*dx+dy*dy)))
+    return math.dist((a[0]+t*dx, a[1]+t*dy), center) <= radius
+
+
 class CatPlay:
     def __init__(self):
         self.kind = ''
@@ -372,6 +397,9 @@ class CatPlay:
         self.eyes = (175, 100)
         self.chin = (175, 137)
         self.face_item = None
+        self.torso_item = None
+        self.neck_bottom = 0
+        self.tap_squint_until = 0
         self.target = self.eyes
         self.direction = self.turns = 0
         self.extreme = self.last_turn = 0
@@ -379,25 +407,181 @@ class CatPlay:
         self.hover_since = 0
         self.hover_origin = None
         self.paper_side = 'right'
+        self.next_invite = 0
+        self.invite_side = 'right'
         self.circle_path = deque()
+        self.phase = ''
+        self.previous_pointer = None
+        self.point_time = 0
+        self.fast_return = False
+        self.swat_start = -100.
+        self.aim = self.eyes
+        self.anchor = None
+        self.still_since = 0
+        self.next_peek = math.inf
+        self.exit_pose = (0., 0.)
 
     def begin(self, kind, now, duration, side):
         self.kind, self.began, self.end, self.side = kind, now, now+duration, side
         self.direction = self.turns = 0
 
-    def toss(self):
-        if not paused:
+    def start_toy(self, kind, now):
+        if live.paused:
+            return
+        self.hover = self.previous_pointer = self.anchor = None
+        self.circle_path.clear()
+        self.swat_start = -100.
+        self.fast_return = False
+        self.phase = 'play'
+        live.last_activity = now
+        if kind == 'paper':
             self.paper_side = 'left' if self.paper_side=='right' else 'right'
-            self.begin('paper', time.monotonic(), 1.55, self.paper_side)
+        self.begin(kind, now, {'paper':6.55,'bubble':4.2,'wand':20.,'box':math.inf}[kind], self.paper_side)
+        if kind == 'bubble':
+            self.bubble_tint = random.choice(KEY_ACCENTS)
+            self.bubble_miss = random.random() < .25
+            self.target = self.bubble_position(now)
+        elif kind == 'wand':
+            self.target = (220, 157)
+            self.still_since = now
+        elif kind == 'box':
+            self.box_entered = now
+            self.target = (175, 222)
+            self.next_peek = now+1.2+random.uniform(3.,5.)
+
+    def toss(self):
+        self.start_toy('paper', time.monotonic())
 
     def ball(self, now):
-        t = max(0, min(1, (now-self.began)/1.55))
+        t = max(0, min(1, (now-self.began)/self.paper_duration()))
         sign = -1 if self.side=='left' else 1
         # Roll in, meet the paw, then bounce back towards the same edge.
         distance = (1-t/.53)**1.2 if t<.53 else ((t-.53)/.47)**.8
-        x = 185+sign*(52+112*distance)
+        # Leave the returned ball beside the keyboard, within a short swipe.
+        x = 185+sign*(52+62*distance)
         bounce = 12*abs(math.sin(math.pi*2*(t-.53)/.47))*(1-t) if t>.53 else 0
         return x, 312+9*distance-bounce
+
+    def paper_duration(self):
+        return .92 if self.fast_return else 1.55
+
+    def bubble_position(self, now):
+        t = min(1., max(0., (now-self.began)/4.2))
+        sign = -1 if self.side == 'left' else 1
+        return (178+sign*(40+15*math.sin(2*math.pi*t)), 304-274*t)
+
+    def update_toy(self, now, cursor, typing):
+        if typing:
+            if self.kind != 'box':
+                self.kind = ''
+                return False
+            if self.phase != 'exit':
+                self.exit_pose = self.box_pose(now)
+                self.phase, self.began, self.end = 'exit', now, now+.38
+        previous = self.previous_pointer
+        dt = max(.01, now-self.point_time)
+        self.previous_pointer, self.point_time = cursor, now
+        if self.kind == 'paper':
+            self.target = self.ball(now)
+            if now-self.began >= self.paper_duration() and previous:
+                toward = 1 if self.side=='left' else -1
+                dx = (cursor[0]-previous[0])*toward
+                if dx > .25 and passes_near(previous, cursor, self.target, 15):
+                    self.fast_return = dx/dt > 320
+                    self.began = now
+                    self.end = now+self.paper_duration()+5
+        elif self.kind == 'bubble' and self.phase == 'play':
+            self.target = self.bubble_position(now)
+            age = now-self.began
+            if previous and passes_near(previous, cursor, self.target, 13):
+                self.pop(now)
+            elif age >= 2.55 and self.swat_start < self.began:
+                self.swat_start = now
+                self.aim = self.bubble_position(now+.19)
+                if self.bubble_miss:
+                    self.aim = (self.aim[0], self.aim[1]+28)
+            elif not self.bubble_miss and 0 <= now-self.swat_start < .45 and now-self.swat_start >= .19:
+                self.pop(now)
+        elif self.kind == 'wand':
+            x, y = cursor
+            if not (12 <= x <= W-12 and 18 <= y <= H-18):
+                self.anchor = None
+                self.still_since = now
+                return True
+            self.target = cursor
+            if self.anchor is None or math.dist(cursor,self.anchor)>5:
+                self.anchor, self.still_since = cursor, now
+            elif now-self.still_since >= .7 and now-self.swat_start >= .85:
+                self.aim, self.swat_start = cursor, now
+                self.side = 'left' if x<175 else 'right'
+                self.still_since = now
+            # A successful catch makes the feather flutter. Moving it away is a dodge.
+            if .17 <= now-self.swat_start <= .35 and math.dist(cursor,self.aim)<13 and math.dist(cursor,paw_rest[self.side])<154:
+                self.phase = 'caught'
+            elif now-self.swat_start > .45:
+                self.phase = 'play'
+        elif self.kind=='box' and self.phase!='exit' and now>=self.next_peek:
+            side = random.choice((-1,1))
+            self.begin_peek(now, side, .18)
+            self.target = (175+side*64, 193)
+        return True
+
+    def pop(self, now):
+        self.phase, self.pop_time, self.end = 'pop', now, now+.45
+
+    def box_tail_fold(self, now):
+        if self.phase == 'exit':
+            folded = ramp((self.began-self.box_entered)/.28)
+            return folded*(1-ramp((now-self.began-.20)/.18))
+        return ramp((now-self.box_entered)/.28)
+
+    def box_pose(self, now):
+        age = now-self.began
+        if self.phase == 'exit':
+            f = 1-ramp(age/.38)
+            return self.exit_pose[0]*f, self.exit_pose[1]*f
+        tucked = ramp((age-.55)/.65)
+        if self.phase == 'peek':
+            rise = ramp((now-self.peek_time)/.28)
+            visible = ramp((self.peek_time+1.25-now)/.38)
+            start_tuck,start_x = self.peek_origin
+            depth,offset = self.peek_target
+            return (1-((1-start_tuck)*(1-rise)+depth*rise)*visible,
+                    (start_x*(1-rise)+offset*rise)*visible)
+        return tucked, 0.
+
+    def begin_peek(self, now, side, depth):
+        # A tap can redirect an ongoing peek without snapping back into the box.
+        self.peek_origin = self.box_pose(now)
+        self.peek_target = (depth, side*26*depth/.32)
+        self.phase, self.peek_time = 'peek', now
+        self.next_peek = now+1.25+random.uniform(3.,5.)
+
+    def touch_box(self, now, point):
+        x,y = point
+        if self.kind=='box' and self.phase!='exit' and now-self.began>=1.2 and 70<=x<=282 and 200<=y<=240:
+            self.begin_peek(now, -1 if x<176 else 1, .32)
+            self.target = point
+            return True
+        return False
+
+    def toy_paw(self, side, rest, now):
+        if self.kind=='paper':
+            t = (now-self.began)/self.paper_duration()
+            amount = max(0., 1-abs(t-.53)/.26)
+            if side!=self.side and not self.fast_return:
+                return rest
+            x,y = self.ball(now)
+            x += (-8 if side=='left' else 8) if self.fast_return else 0
+        elif self.kind in ('bubble','wand') and side==self.side:
+            age = now-self.swat_start
+            amount = ramp(age/.18)*ramp((.46-age)/.25)
+            x,y = self.aim
+            distance = max(1.,math.dist(rest,self.aim))
+            amount *= min(1., (184 if self.kind=='bubble' else 154)/distance)
+        else:
+            return rest
+        return rest[0]+(x-rest[0])*amount, rest[1]+(y-rest[1])*amount
 
     def near_face(self, cursor):
         x,y = cursor
@@ -406,18 +590,30 @@ class CatPlay:
         px,py = x*c.zoom,y*c.zoom
         return self.face_item in c.find_overlapping(px,py,px,py)
 
+    def near_neck(self,cursor):
+        x,y=cursor
+        if self.torso_item is None or y>self.neck_bottom:
+            return False
+        px,py=x*c.zoom,y*c.zoom
+        return self.torso_item in c.find_overlapping(px,py,px,py)
+
+    def high_five(self,now):
+        if self.kind in ('offer','invite'):
+            self.begin('tap',now,.32,self.side)
+            self.tap_squint_until=now+.65 if random.randrange(3)==0 else 0
+
     def nearby_paw(self, cursor):
         # The hand moves away from the pointer as it leaves the mouse. Keep
         # its approach path interactive so the user can follow it to the chest.
         if self.hover:
             ax,ay = self.hover_origin
-            bx,by = paw_positions[self.hover]
+            bx,by = live.paw_positions[self.hover]
             dx,dy = bx-ax,by-ay
             t = max(0,min(1,((cursor[0]-ax)*dx+(cursor[1]-ay)*dy)/max(1,dx*dx+dy*dy)))
             if math.dist(cursor,(ax+t*dx,ay+t*dy)) <= 32:
                 return self.hover
         distances = {side:min(math.dist(cursor,point),math.dist(cursor,paw_rest[side]))
-                     for side,point in paw_positions.items()}
+                     for side,point in live.paw_positions.items()}
         closest = min(distances,key=distances.get)
         return closest if distances[closest]<=24 else None
 
@@ -460,27 +656,31 @@ class CatPlay:
             if self.kind=='tap':
                 self.hover_since=now
             self.kind = ''
-        if near and not (paused or drag or pressed) and self.kind in ('','tease'):
+        if self.kind in TOYS and not live.paused:
+            return self.update_toy(now, cursor, bool(pressed-{1,2}))
+        if near and not (live.paused or live.drag or pressed) and self.kind in ('','tease'):
             if self.circling(now,cursor):
                 self.begin('dizzy',now,2.4,'left')
         else:
             self.circle_path.clear()
-        if drag and drag.get('rub') and not paused and not pressed:
+        if live.drag and live.drag.get('rub') and not live.paused and not pressed:
             self.kind='chin'
             self.end=now+.5
-        if paused or pressed.intersection(key_positions):
-            if self.kind!='stretch' or paused:
+        if live.paused or pressed.intersection(key_positions):
+            if self.kind!='stretch' or live.paused:
                 self.kind = ''
             self.hover = None
             self.direction = self.turns = 0
             return False
-        if self.kind in ('offer','tap'):
+        if self.kind=='invite' and math.dist(cursor,live.paw_positions[self.side])<=19:
+            self.high_five(now)
+        if self.kind in ('offer','invite','tap'):
             self.direction = self.turns = 0
             return True
-        if self.kind or drag or pressed:
+        if self.kind or live.drag or pressed:
             self.direction = self.turns = 0
             self.hover = None
-            return bool(self.kind or (drag and drag.get('chin')))
+            return bool(self.kind or (live.drag and live.drag.get('chin')))
         x,y = cursor
         if near:
             self.target = cursor
@@ -504,69 +704,126 @@ class CatPlay:
             self.hover_origin = cursor if hover else None
         if hover and now-self.hover_since>.45:
             self.begin('offer', now, 1.6, hover)
+        elif (not near and not hover and 10<=now-live.last_activity<13 and now>=self.next_invite
+              and not (painter.window and painter.window.winfo_exists())):
+            self.begin('invite',now,5,self.invite_side)
+            self.invite_side='left' if self.invite_side=='right' else 'right'
+            self.next_invite=now+60
         return near or bool(hover)
 
     def paw(self, now, rest):
         x,y = rest
         sign = -1 if self.side=='left' else 1
         t = max(0,min(1,(now-self.began)/(self.end-self.began)))
-        if self.kind in ('offer','tap'):
-            return x+sign*8, y-(52 if self.kind=='offer' else 52+8*math.sin(math.pi*t))
-        if self.kind=='paper':
-            gx,gy = self.ball(now)
-            amount = max(0,1-abs(t-.53)/.26)
-        else:
-            gx,gy = self.target
-            amount = math.sin(math.pi*max(0,min(1,(t-.24)/.7)))
-            gy = max(gy, y-107)
+        if self.kind in ('offer','invite','tap'):
+            return x+sign*8, y-(52+8*math.sin(math.pi*t) if self.kind=='tap' else 52)
+        gx,gy = self.target
+        amount = math.sin(math.pi*max(0,min(1,(t-.24)/.7)))
+        gy = max(gy, y-107)
         return x+(gx-x)*amount,y+(gy-y)*amount
 
 play = CatPlay()
 
 def draw(now, mouse, pressed):
-    global face_gaze_x
-    global mouse_lean, body_follow, typing_balance, look_turn, eye_lowering, head_pitch
+    render_scene(c,painter,play,live,now,mouse,pressed)
+
+def draw_box(canvas, front):
+    tag = 'box_front' if front else 'box_back'
+    def panel(points, fill):
+        canvas.create_polygon(*points, fill=fill, outline='#815535', width=1.5, tags=tag)
+    if front:
+        panel((80,218, 256,218, 249,319, 92,319), '#d6a36e')
+        panel((256,218, 273,202, 265,299, 249,319), '#bb8658')
+        panel((80,218, 256,218, 249,232, 73,232), '#e8bd8c')
+        panel((256,218, 273,202, 279,214, 262,230), '#ddb07d')
+        canvas.create_line(154,245, 161,252, 170,253, 178,246, smooth=True,
+                           fill='#9b7048',width=2,tags=tag)
+    else:
+        panel((80,218, 97,202, 273,202, 256,218), '#886144')
+        panel((97,202, 87,190, 261,190, 273,202), '#e1b687')
+
+def draw_air_toy(canvas, play, now):
+    x,y = play.target
+    if play.kind=='bubble':
+        tint = colors.palette_color('浮字按键提示', play.bubble_tint)
+        if colors.themes['浮字按键提示'].get():
+            tint = dark_color(tint)
+        edge = shade(tint,.76)
+        if play.phase=='pop':
+            age = (now-play.pop_time)/.29
+            if age>=1:
+                return
+            for i in range(8):
+                a = math.tau*i/8
+                r = 13+age*11
+                dx,dy = math.cos(a), math.sin(a)
+                canvas.create_line(x+r*dx,y+r*dy,x+(r+4*(1-age))*dx,y+(r+4*(1-age))*dy,
+                                   fill=edge,width=2,tags='toy_bubble')
+        else:
+            canvas.create_oval(x-13,y-13,x+13,y+13,fill=pale(tint,.5),stipple='gray25',
+                               outline=edge,width=2,tags='toy_bubble')
+            canvas.create_arc(x-10,y-10,x+10,y+10,start=93,extent=56,style=tk.ARC,
+                              outline=pale(tint,.83),width=2,tags='toy_bubble')
+    elif play.kind=='wand':
+        # The feather tip follows the pointer; the shaft trails off to the side.
+        sign = 1 if x<W-64 else -1
+        sway = (5 if play.phase=='caught' else 1.5)*math.sin((now-play.began)*22)
+        tx,ty = x+sign*(12+sway),y-12
+        canvas.create_line(x+sign*50,y-44,x+sign*26,y-31,fill='#8f603e',width=3,
+                           capstyle=tk.ROUND,tags='toy_wand')
+        canvas.create_line(x+sign*26,y-31,tx+sign*8,ty-1,tx,ty,fill='#9e837d',
+                           smooth=True,width=1.5,tags='toy_wand')
+        canvas.create_polygon(tx,ty,tx-sign*11,ty-4,x-sign*5,y+6,x+sign*9,y+1,tx,ty,
+                              smooth=True,fill='#e98e94',outline='#975662',tags='toy_wand')
+        canvas.create_line(x-sign*3,y+3,tx,ty,fill='#ffe1c9',width=1.5,tags='toy_wand')
+
+def render_scene(c,painter,play,pose,now,mouse,pressed):
     c.delete('all')
+    boxed = play.kind=='box'
+    tuck, peek = play.box_pose(now) if boxed else (0., 0.)
+    tail_fold = play.box_tail_fold(now) if boxed else 0.
+    box_visible = tail_fold >= .95
+    if box_visible:
+        draw_box(c,False)
     stretch = 0.0
     if play.kind=='stretch':
         phase = (now-play.began)/(play.end-play.began)
         # Push forward quickly, hold the extended pose, then rise more slowly.
-        ramp = max(0.0,min(1.0,phase/.32,(1-phase)/.48))
-        stretch = ramp*ramp*(3-2*ramp)
-    idle = now-last_activity > 18 and not play.kind
-    quiet = max(0, now-last_activity-2)
-    breath = .005*(1-math.cos(2*math.pi*quiet/4)) if not pressed and not paused else 0
+        stretch = ramp(min(phase/.32,(1-phase)/.48))
+    idle = now-pose.last_activity >= SLEEP_AFTER and not play.kind
+    quiet = max(0, now-pose.last_activity-2)
+    breath = .005*(1-math.cos(2*math.pi*quiet/4)) if not pressed and not pose.paused else 0
     # Trace the supplied front-view reference in its original proportions.
     held_buttons = pressed & {1,2}
-    mouse_buttons = held_buttons or {button for button in (1,2) if now < pressed_until.get(button,0)}
-    if paused or play.hover or play.kind in ('offer','tap','chin') or (drag and drag.get('chin')):
+    mouse_buttons = held_buttons or {button for button in (1,2) if now < pose.pressed_until.get(button,0)}
+    if pose.paused or pose.mouse_blocked:
         mouse_buttons = set()
     mouse_down = bool(mouse_buttons)
-    mouse_pose = not paused and (now < mouse_work_until or
-                                 (now < mouse_active_until and now-last_key_time>.35))
+    mouse_pose = not pose.paused and (now < pose.mouse_work_until or
+                                 (now < pose.mouse_active_until and now-pose.last_key_time>.35))
     leaning = mouse_pose or mouse_down
     if play.kind:
         leaning = False
     # Bridge the short gaps between taps so the torso settles during a word.
-    sharing = leaning and now < until['right'] + .18 and now-last_key_time < .34
-    typing_balance += (float(sharing)-typing_balance)*.32
-    mouse_lean += (float(leaning)-mouse_lean)*.38
-    if mouse_lean < .002:
-        mouse_lean = 0.0
+    sharing = leaning and now < pose.until['right'] + .18 and now-pose.last_key_time < .34
+    pose.typing_balance += (float(sharing)-pose.typing_balance)*.32
+    pose.mouse_lean += (float(leaning)-pose.mouse_lean)*.38
+    if pose.mouse_lean < .002:
+        pose.mouse_lean = 0.0
 
     # A forward push is screen-down for the cat. Reach a little left and down.
-    mx,my = mouse_offset
+    mx,my = pose.mouse_offset
     target_x = .24*mx - .33*my if leaning else 0.0
-    target_y = 28 + 3*typing_balance + .60*my if leaning else 0.0
+    target_y = 28 + 3*pose.typing_balance + .60*my if leaning else 0.0
     gaze_key = None
-    if leaning and now < until['right'] and stroke_key['right'] is not None:
+    if leaning and now < pose.until['right'] and pose.stroke_key['right'] is not None:
         # The free paw can cross the entire board. Look at its actual target.
-        gaze_key = targets['right']
+        gaze_key = pose.targets['right']
         idle = False
-    elif not leaning and not paused:
+    elif not leaning and not pose.paused:
         # Prefer held keys; retain a short tap just long enough to see it.
         held = pressed.intersection(key_positions)
-        visible = held or {k for k in key_positions if pressed_until.get(k,0)>now}
+        visible = held or {k for k in key_positions if pose.pressed_until.get(k,0)>now}
         letters = [k for k in visible if 65 <= k <= 90]
         points = [key_positions[k] for k in (letters or visible)]
         if points:
@@ -578,27 +835,31 @@ def draw(now, mouse, pressed):
             center_x = (key_positions[ord('Q')][0]+key_positions[ord('P')][0])/2
             target_x = max(-15,min(15,(gx-center_x)*.19))
             target_y = 30
-    if play.kind in ('tease','paper') or play.direction:
-        gaze_key = play.ball(now) if play.kind=='paper' else play.target
+    if play.kind in TOYS or play.kind=='tease' or play.direction:
+        gaze_key = play.target
         idle = False
+    if boxed and play.phase=='play':
+        target_y += 13*math.sin(math.pi*ramp((now-play.began)/.55))
+    elif play.kind=='wand' and play.anchor is not None:
+        target_y += 9*ramp((now-play.still_since-.27)/.4)
     if play.kind=='chin':
         target_y -= 9
-    follow_x,follow_y = body_follow
+    follow_x,follow_y = pose.body_follow
     shoulder_rate=.15 if gaze_key is not None else .28
-    body_follow = (follow_x+shoulder_rate*(target_x-follow_x), follow_y+shoulder_rate*(target_y-follow_y))
+    pose.body_follow = (follow_x+shoulder_rate*(target_x-follow_x), follow_y+shoulder_rate*(target_y-follow_y))
     # Add a small yaw around the existing three-quarter pose, eased with the reach.
-    yaw = math.radians(max(-3.3,min(3.3,.75*body_follow[0])))
+    yaw = math.radians(max(-3.3,min(3.3,.75*pose.body_follow[0])))
     width_change = math.cos(math.radians(18)-yaw)/math.cos(math.radians(18))-1
 
     # Dual-input reference: the head sits about one sixth of a head-width
     # towards the mouse from the hips. The forelegs can still reach fully.
-    torso_lean = mouse_lean * (1-.70*typing_balance)
-    face_turn = mouse_lean * (1-.83*typing_balance)
+    torso_lean = pose.mouse_lean * (1-.70*pose.typing_balance)
+    face_turn = pose.mouse_lean * (1-.83*pose.typing_balance)
     if gaze_key is not None:
-        look_direction=(gaze_key[0]-(CAT_ORIGIN_X+390*.34+body_follow[0]))/100
+        look_direction=(gaze_key[0]-(CAT_ORIGIN_X+390*.34+pose.body_follow[0]))/100
     else:
         look_direction=2*mouse[0]/max(1,root.winfo_screenwidth())-1
-    look_turn += .36*((0 if idle or paused else max(-1,min(1,look_direction)))-look_turn)
+    pose.look_turn += .36*((0 if idle or pose.paused else max(-1,min(1,look_direction)))-pose.look_turn)
     def ref(x,y,tilt=True):
         x += (x-390)*.7*breath
         y += (y-852)*breath
@@ -609,26 +870,32 @@ def draw(now, mouse, pressed):
             # reaching forelegs. Move the head as one shape above the neck.
             x += (x-390)*.08*stretch
             y += (15+.47*min(470,max(0,852-y)))*stretch
-        return (CAT_ORIGIN_X+(x-208*torso_lean*weight)*.34 + body_follow[0]*weight,
-                15+y*.34 + body_follow[1]*weight)
+        px = CAT_ORIGIN_X+(x-208*torso_lean*weight)*.34 + pose.body_follow[0]*weight
+        py = 15+y*.34 + pose.body_follow[1]*weight
+        if boxed:
+            px += (175-px)*.34*tuck+peek
+            py += (191-.61*py)*tuck
+        return px,py
     # Measure height from the cat's eyes, even after the window is dragged.
     eye_screen_y = c.winfo_rooty() + c.zoom * ref(390,246)[1]
     distance_y = mouse[1] - eye_screen_y
     pitch_target = math.copysign(min(1,max(0,abs(distance_y)-10)/140),distance_y)
-    if idle or paused or gaze_key is not None:
+    if idle or pose.paused or gaze_key is not None:
         pitch_target = 0
-    head_pitch += .17*(pitch_target-head_pitch)
-    age=max(0,now-expression_start)
-    reaction=expression if age < {'squint':.82,'yawn':1.55,'annoyed':ANGER_DURATION}.get(expression,0) else ''
+    pose.head_pitch += .17*(pitch_target-pose.head_pitch)
+    age=max(0,now-pose.expression_start)
+    reaction=pose.expression if age < {'squint':.82,'yawn':1.55,'annoyed':ANGER_DURATION}.get(pose.expression,0) else ''
+    if not reaction and now<play.tap_squint_until:
+        reaction='squint'
     if play.kind=='chin':
         reaction='squint'
-        head_pitch += .3*(-1-head_pitch)
+        pose.head_pitch += .3*(-1-pose.head_pitch)
     if play.kind=='stretch':
         reaction='yawn'
         gape=stretch
     else:
         gape=math.sin(math.pi*age/1.55)**1.3 if reaction=='yawn' else 0
-    horizontal_turn=1.1*look_turn-face_turn+2*math.sin(yaw)
+    horizontal_turn=1.1*pose.look_turn-face_turn+2*math.sin(yaw)
     dizzy = play.kind=='dizzy'
     spin = now-play.began if dizzy else 0
     sway = math.sin(spin*7)*min(1,spin*6,max(0,(play.end-now)*3)) if dizzy else 0
@@ -639,15 +906,15 @@ def draw(now, mouse, pressed):
         brow_curve=max(0,1-((y-250)/120)**2)
         surface_depth=depth or 36*cheek_curve*brow_curve
         fx=x+horizontal_turn*surface_depth-.08*face_turn*(x-390)
-        fx+=look_turn*12-abs(look_turn)*.047*(x-390)
-        fy=y+(face_turn*.08+look_turn*.024)*(x-390)
+        fx+=pose.look_turn*12-abs(pose.look_turn)*.047*(x-390)
+        fy=y+(face_turn*.08+pose.look_turn*.024)*(x-390)
         if play.kind=='tease':
             fy += .065*(1 if play.side=='right' else -1)*(x-390)
         if dizzy:
             fx += .07*sway*(385-y)
             fy += .07*sway*(x-390)
         # Keep the neck anchored; the ears and forward facial features move most.
-        fy+=head_pitch*(.057*(397-y)+.42*depth)
+        fy+=pose.head_pitch*(.057*(397-y)+.42*depth)
         return ref(fx,fy-8*gape)
     play.eyes, play.chin = face(390,246,28), face(390,358)
     def contour(points,fill=ink,width=0,project_point=ref):
@@ -657,7 +924,7 @@ def draw(now, mouse, pressed):
     def visible(color):
         return '#fe00ff' if color=='#ff00ff' else color
     coat=visible(colors.current['身体'])
-    artwork = painter.active()
+    artwork = painter.active() if pose is live else painter.record
     if artwork:
         coat = visible(artwork['base'])
     ginger_white=coat=='ginger_white'
@@ -689,12 +956,19 @@ def draw(now, mouse, pressed):
     def tail_point(x,y):
         px,py=ref(x,y,tilt=False)
         # Keep the root tucked behind the leaning hip; taper the shift towards the tip.
-        anchor=mouse_lean*max(0,min(1,(TAIL[-1][0]-x)/(TAIL[-1][0]-root_x)))
+        anchor=pose.mouse_lean*max(0,min(1,(TAIL[-1][0]-x)/(TAIL[-1][0]-root_x)))
         px+=(hip_x-rest_x-6)*anchor
         py+=(hip_y-rest_y)*anchor
         bend=((x-565)/214)**2*turn
         tip = (x-root_x)/(TAIL[-1][0]-root_x)
-        return px+2*bend,py-bend-32*stretch*tip*tip
+        px += 2*bend
+        py -= bend+32*stretch*tip*tip
+        if tail_fold:
+            # Draw the tail in behind the hip before the cat ducks. The head
+            # can peek over either rim while the tail stays inside the box.
+            px += ((hip_x-px)*.76-32)*tail_fold
+            py += (hip_y-py)*.65*tail_fold
+        return px,py
 
     def hind_paw_point(x,y):
         px,py=ref(x,y)
@@ -704,28 +978,48 @@ def draw(now, mouse, pressed):
         return px+1.4*height*turn,py+.8*height*turn*side
 
     # Tail, broad pear-shaped torso, and tucked white hind toes.
-    tail=[n for x,y in TAIL for n in tail_point(x,y)]
-    if stroke:
-        c.create_line(*tail,fill=stroke,width=22,smooth=True,capstyle=tk.ROUND)
     tail_fur={'calico':'#151515','ginger_white':patch_color}.get(coat,flat)
-    c.create_line(*tail,fill=tail_fur,width=19,smooth=True,capstyle=tk.ROUND)
+    band=stripe if tabby else '#e69a55'
+    if colors.short_tail.get():
+        # Clip the original root band to the ball in coat coordinates.
+        outline=[(BOB_X+BOB_RADIUS*math.cos(i*math.tau/72),
+                  BOB_Y+BOB_RADIUS*math.sin(i*math.tau/72)) for i in range(72)]
+        contour(outline,tail_fur,width=1.6,project_point=tail_point)
+        if patched or tabby:
+            # The first stripe starts at the centre and points along (28,-4).
+            half_width=8.5/.34
+            arc=math.asin(half_width/BOB_RADIUS)
+            local=[(0,-half_width)]
+            for i in range(33):
+                angle=-arc+2*arc*i/32
+                local.append((BOB_RADIUS*math.cos(angle),BOB_RADIUS*math.sin(angle)))
+            local.append((0,half_width))
+            length=math.hypot(28,4)
+            segment=[(BOB_X+(28*x+4*y)/length,BOB_Y+(-4*x+28*y)/length) for x,y in local]
+            c.create_polygon(*[n for point in segment for n in tail_point(*point)],fill=band)
+    else:
+        tail=[n for x,y in TAIL for n in tail_point(x,y)]
+        if stroke:
+            c.create_line(*tail,fill=stroke,width=22,smooth=True,capstyle=tk.ROUND)
+        c.create_line(*tail,fill=tail_fur,width=19,smooth=True,capstyle=tk.ROUND)
+        if tuxedo:
+            c.create_line(*tail_point(758,566),*tail_point(779,560),
+                          fill=white_fur,width=18,capstyle=tk.ROUND)
+        if patched or tabby:
+            for a,b in [((606,690),(634,686)),((671,660),(688,635)),((715,599),(733,580))]:
+                c.create_line(*tail_point(*a),*tail_point(*b),fill=band,width=17,capstyle=tk.BUTT)
+            if tabby:
+                c.create_line(*tail_point(757,567),*tail_point(779,560),fill=stripe,width=18,capstyle=tk.ROUND)
     if artwork:
         painter.render('tail', tail_point)
-    if tuxedo:
-        c.create_line(*tail_point(758,566),*tail_point(779,560),
-                      fill=white_fur,width=18,capstyle=tk.ROUND)
-    if patched or tabby:
-        band=stripe if tabby else '#e69a55'
-        for a,b in [((606,690),(634,686)),((671,660),(688,635)),((715,599),(733,580))]:
-            c.create_line(*tail_point(*a),*tail_point(*b),fill=band,width=17,capstyle=tk.BUTT)
-        if tabby:
-            c.create_line(*tail_point(757,567),*tail_point(779,560),fill=stripe,width=18,capstyle=tk.ROUND)
     body_shape, head_shape = BODY, HEAD
     # Put both silhouettes' borders beneath both fills, hiding their common seam.
     if stroke:
         contour(body_shape,flat,width=1.6)
         contour(head_shape,face_fur,width=1.6,project_point=face)
     torso_item = contour(body_shape,flat)
+    play.torso_item=torso_item
+    play.neck_bottom=ref(390,475)[1]
     if artwork:
         painter.render('body', ref)
     if white_tuxedo:
@@ -736,7 +1030,7 @@ def draw(now, mouse, pressed):
                  (238,692),(221,625),(221,545),(233,459)],white_fur)
     elif tuxedo:
         # Foreshorten the lower bib with the reach so both shoulders meet black fur.
-        lift=mouse_lean*60
+        lift=pose.mouse_lean*60
         contour([(249,370),(310,344),(435,343),(502,367),(518,430),
                  (523,474),(507,529-lift*.4),(473,558-lift*.7),(432,574-lift),
                  (393,593-lift),(362,579-lift),(317,570-lift),(267,545-lift),
@@ -798,30 +1092,30 @@ def draw(now, mouse, pressed):
     if artwork:
         painter.render('head', face)
     if colors.body_shadow.get():
-        draw_coat_shading(([ref(x,y) for x,y in body_shape],[face(x,y) for x,y in head_shape]))
+        draw_coat_shading(c,([ref(x,y) for x,y in body_shape],[face(x,y) for x,y in head_shape]))
     blink = idle or (now % 5.5 < .13)
     if gaze_key is not None:
         cx,cy=face(388,246,depth=28)
         down=gaze_key[1]-cy
         lowering=max(0,down/max(1,math.hypot(gaze_key[0]-cx,down)))
     else:
-        lowering=.35*max(0,head_pitch)
-    eye_lowering+=(lowering-eye_lowering)*(.34 if lowering>eye_lowering else .18)
-    eye_scale=1-.22*eye_lowering
+        lowering=.35*max(0,pose.head_pitch)
+    pose.eye_lowering+=(lowering-pose.eye_lowering)*(.34 if lowering>pose.eye_lowering else .18)
+    eye_scale=1-.22*pose.eye_lowering
     tracking_face = bool(play.direction or play.kind=='tease')
     if tracking_face:
         cursor_x = (mouse[0]-c.winfo_rootx())/c.zoom
         eye_mid_x = (face(316,246,28)[0]+face(459,246,28)[0])/2
         target_dx = max(-8, min(8, (cursor_x-eye_mid_x)*.16))
-        face_gaze_x += .35*(target_dx-face_gaze_x)
+        pose.face_gaze_x += .35*(target_dx-pose.face_gaze_x)
     else:
-        face_gaze_x = 0.0
+        pose.face_gaze_x = 0.0
     for ex in (316,459):
         x,y=face(ex,246,depth=28)
         eye_width=17-face_turn*(3.5 if ex==316 else .8)
-        eye_width-=1.9*max(0,look_turn if ex==459 else -look_turn)
+        eye_width-=1.9*max(0,pose.look_turn if ex==459 else -pose.look_turn)
         if dizzy:
-            oval(x-eye_width,y-13,x+eye_width,y+13,iris,eye_outline,1.5)
+            oval(c,x-eye_width,y-13,x+eye_width,y+13,iris,eye_outline,1.5)
             spiral=[]
             for i in range(41):
                 a=spin*4+i*.24
@@ -838,17 +1132,17 @@ def draw(now, mouse, pressed):
                 c.create_line(x-eye_width+2,y,x,y+3,x+eye_width-2,y,fill=eye_outline,width=5,smooth=True,capstyle=tk.ROUND)
             c.create_line(x-eye_width+2,y,x,y+3,x+eye_width-2,y,fill=iris,width=3,smooth=True)
         else:
-            y+=1.2*eye_lowering
-            oval(x-eye_width,y-14*eye_scale,x+eye_width,y+14*eye_scale,iris,eye_outline,1.5)
+            y+=1.2*pose.eye_lowering
+            oval(c,x-eye_width,y-14*eye_scale,x+eye_width,y+14*eye_scale,iris,eye_outline,1.5)
             dx=max(-4,min(4,(mouse[0]/max(1,root.winfo_screenwidth())-.5)*8))
-            dy=2*head_pitch
+            dy=2*pose.head_pitch
             if gaze_key is not None:
                 vx,vy=gaze_key[0]-x,gaze_key[1]-y
                 distance=max(1,math.hypot(vx,vy))
                 dx,dy=10*vx/distance,3.8*vy/distance
             if tracking_face:
-                dx=face_gaze_x
-            oval(x-5+dx,y+(-10+dy)*eye_scale,x+5+dx,y+(10+dy)*eye_scale,pupil)
+                dx=pose.face_gaze_x
+            oval(c,x-5+dx,y+(-10+dy)*eye_scale,x+5+dx,y+(10+dy)*eye_scale,pupil)
     if dizzy:
         x,y=face(390,78)
         for i in range(3):
@@ -861,9 +1155,9 @@ def draw(now, mouse, pressed):
             c.create_polygon(*star,fill='#ffdb73',outline='#916834',width=.8,tags='dizzy_star')
     elif reaction=='yawn':
         x,y=face(390,320,14)
-        oval(x-3-5*gape,y-1-8*gape,x+3+5*gape,y+1+9*gape,'#462b31','#241d20')
+        oval(c,x-3-5*gape,y-1-8*gape,x+3+5*gape,y+1+9*gape,'#462b31','#241d20')
         if gape>.45:
-            oval(x-4*gape,y+3*gape,x+4*gape,y+7*gape,'#d98e92')
+            oval(c,x-4*gape,y+3*gape,x+4*gape,y+7*gape,'#d98e92')
     elif reaction=='annoyed':
         x,y=face(498,165)
         y-=2*math.sin(min(1,age/.2)*math.pi)
@@ -880,8 +1174,10 @@ def draw(now, mouse, pressed):
             c.create_line(*[n for pt in pts for n in pt],fill=whisker,width=1,smooth=True)
     # Pastel keyboard drawn from the supplied reference, kept crisp at pet size.
     for item in c.find_all():
-        if c.type(item)!='image':
+        if c.type(item)!='image' and 'box_back' not in c.gettags(item):
             c.addtag_withtag('pet_target',item)
+    if box_visible:
+        draw_box(c,True)
     top=board_rect(69,292,252,95)
     bottom=[(x,y+10) for x,y in top]
     base_color=colors.palette_color('键盘',white)
@@ -892,34 +1188,34 @@ def draw(now, mouse, pressed):
         front,side,edge,plate,rim,well=('#24292e','#333a40','#121518','#22262a','#4b5258','#101215')
     else:
         front,side,edge,plate,rim,well=('#9ca9b0','#b2bec3','#77868e','#e9eeee','#fafdfd','#c4ced0')
-    board_layer=quad([top[0],top[1],bottom[1],bottom[0]],front,edge)
-    quad([top[0],top[3],bottom[3],bottom[0]],side,edge)
-    quad(top,plate,rim)
-    quad(board_rect(73,296,244,87),well)
+    board_layer=quad(c,[top[0],top[1],bottom[1],bottom[0]],front,edge)
+    quad(c,[top[0],top[3],bottom[3],bottom[0]],side,edge)
+    quad(c,top,plate,rim)
+    quad(c,board_rect(73,296,244,87),well)
     cap_colors={key:colors.palette_color('键盘',key) for key in (white,)+KEY_ACCENTS}
     if dark:
         cap_colors={key:dark_color(value) for key,value in cap_colors.items()}
     keyboard_labels = colors.keyboard_labels.get()
     for x,y,w,h,label,code,color in sorted(keys,key=lambda k:project(k[0],k[1])[1]):
-        impact = key_contact.get(code, -1)
-        down = (not paused and code in key_contact and impact <= now
+        impact = pose.key_contact.get(code, -1)
+        down = (not pose.paused and code in pose.key_contact and impact <= now
                 and (code in pressed or now < impact+.075))
         height = .5 if down else 6
         color=cap_colors[color]
         color = shade(color,.93) if down else color
         base=board_rect(x,y,w,h)
-        quad(board_rect(x-.5,y-.5,w+1,h+1),'#383d42' if dark else '#7e8a90')
+        quad(c,board_rect(x-.5,y-.5,w+1,h+1),'#383d42' if dark else '#7e8a90')
         cap=board_rect(x+.5,y+.5,w-1,h-1,height)
-        quad([cap[0],cap[1],base[1],base[0]],shade(color,.72))
-        quad([cap[0],cap[3],base[3],base[0]],shade(color,.83))
-        quad(cap,color,shade(color,.86))
+        quad(c,[cap[0],cap[1],base[1],base[0]],shade(color,.72))
+        quad(c,[cap[0],cap[3],base[3],base[0]],shade(color,.83))
+        quad(c,cap,color,shade(color,.86))
         tx,ty=project(x+w/2,y+h/2,height)
         if keyboard_labels:
-            c.create_image(tx,ty,image=key_label(label,x+w/2,y+h/2,dark))
+            c.create_image(tx,ty,image=key_label(c,label,x+w/2,y+h/2,dark))
     # Mouse in the cat's operating direction: palm end near the cat,
     # front buttons farther away, towards the viewer's lower left.
     def mp(x,y,z=0):
-        return (57+mouse_offset[0]+17*x-11*y, 318+mouse_offset[1]+7*x+18*y-z)
+        return (57+pose.mouse_offset[0]+17*x-11*y, 318+pose.mouse_offset[1]+7*x+18*y-z)
     def mouse_shape(points,color,z=0,outline=''):
         c.create_polygon(*[v for x,y in points for v in mp(x,y,z)],
                          fill=color,outline=outline,smooth=True)
@@ -941,12 +1237,12 @@ def draw(now, mouse, pressed):
     x1,y1=mp(-.6,-.65,3);x2,y2=mp(.25,-.83,3)
     c.create_line(x1,y1,x2,y2,fill=shade(mouse_color,1.15),width=2,smooth=True)
     for side in ('left','right'):
-        reach=mouse_lean
+        reach=pose.mouse_lean
         if side=='left':
             start=ref(306-36*reach,609-94*reach)
             rest=ref(331,831)
             # Rest between the buttons and pivot slightly towards the clicked side.
-            palm_y = .40 - (.12 if mouse_down else .35)*typing_balance
+            palm_y = .40 - (.12 if mouse_down else .35)*pose.typing_balance
             contact=mp(.22*(int(left_down)-int(right_down)),palm_y,2 if mouse_down else 4)
         else:
             # Let the shoulder follow the turned chest while the paw stays planted.
@@ -954,21 +1250,21 @@ def draw(now, mouse, pressed):
             rest=ref(447,831)
             edge_x,edge_y=project(190,387)
             contact=(edge_x,edge_y+3)
-        active = now < until[side] and not paused
-        shoulder_drop = max(0,body_follow[1])*.29
+        active = now < pose.until[side] and not pose.paused
+        shoulder_drop = max(0,pose.body_follow[1])*.29
         if side=='left':
             shoulder_drop += 5*reach
         start=(start[0], start[1]+shoulder_drop)
-        kx,ky = targets[side] if active else rest
+        kx,ky = pose.targets[side] if active else rest
         if active:
             ky+=5.5
-            elapsed=max(0,now-stroke_start[side])
-            duration=CONTACT_TIME-.085*stroke_speed[side]
+            elapsed=max(0,now-pose.stroke_start[side])
+            duration=CONTACT_TIME-.085*pose.stroke_speed[side]
             lift_time=.46*duration
-            ox,oy=stroke_origin[side]
+            ox,oy=pose.stroke_origin[side]
             # Fold the paw towards the chest before extending to the key.
             apex=(start[0]+(-8 if side=='left' else 8),start[1]+20)
-            speed=stroke_speed[side]
+            speed=pose.stroke_speed[side]
             apex=(apex[0]*(1-speed)+(.6*ox+.4*kx)*speed,
                   apex[1]*(1-speed)+(min(oy,ky)-11)*speed)
             if elapsed < lift_time:
@@ -981,7 +1277,7 @@ def draw(now, mouse, pressed):
                 phase=min(1,(elapsed-lift_time)/(duration-lift_time))
             blend=phase*phase*(3-2*phase)
             kx,ky=ax+(bx-ax)*blend,ay+(by-ay)*blend
-        elif not leaning and now < until['right' if side=='left' else 'left']+.28 and not paused:
+        elif not leaning and now < pose.until['right' if side=='left' else 'left']+.28 and not pose.paused:
             kx,ky=start[0]+(-8 if side=='left' else 8),start[1]+22
         hand_reach = 0 if active and side=='right' else reach
         tx=kx+(contact[0]-kx)*hand_reach
@@ -989,12 +1285,14 @@ def draw(now, mouse, pressed):
         if not active and play.kind=='stretch':
             spread = -28 if side=='left' else 28
             tx,ty = rest[0]+spread*stretch,rest[1]+54*stretch
-        elif not active and side==play.side and play.kind in ('tease','paper','offer','tap'):
+        elif not active and play.kind in TOYS:
+            tx,ty = play.toy_paw(side,rest,now)
+        elif not active and side==play.side and play.kind in ('tease','offer','invite','tap'):
             tx,ty = play.paw(now,rest)
-        oldx,oldy=paw_positions[side]
-        if not active:
+        oldx,oldy=pose.paw_positions[side]
+        if not active and pose is live:
             tx,ty=oldx+(tx-oldx)*.6,oldy+(ty-oldy)*.6
-        paw_positions[side]=(tx,ty)
+        pose.paw_positions[side]=(tx,ty)
         sx,sy=start
         tag='foreleg_'+side
         lift=max(0,min(1,(rest[1]-ty)/max(1,rest[1]-sy-22)))
@@ -1053,16 +1351,18 @@ def draw(now, mouse, pressed):
             ribbon=[(x+nx*w,y+ny*w) for (x,y),w in zip(edge,widths)]
             ribbon+=list(reversed([(x-nx*w,y-ny*w) for (x,y),w in zip(edge,widths)]))
             c.create_polygon(*[v for pt in ribbon for v in pt],smooth=True,fill=flat if artwork else '#a6a69f',tags=tag)
-        draw_paw(tx,toe_bottom,toe_width,toe_height,tag,toe_fur,stroke if artwork or whisker=='#191919' else '',
+        draw_paw(c,tx,toe_bottom,toe_width,toe_height,tag,toe_fur,stroke if artwork or whisker=='#191919' else '',
                  flat if artwork else stripe if tabby else '#f6f5ed',wide_tip=orange_tabby)
         if artwork:
             center = 331 if side=='left' else 447
             painter.render(side+'_paw', lambda x,y: (tx+(x-center)*.34*toe_width/13,
                 toe_bottom + ((y-831)*.34-9)*toe_height/(13*.92)), tag)
-        if side=='right' and reach>.5 and not active:
+        if box_visible and not active:
+            c.tag_lower(tag,'box_front')
+        elif side=='right' and reach>.5 and not active:
             c.tag_lower(tag,board_layer)
-    if colors.click_marks.get() and not paused:
-        for button,born in click_started.items():
+    if colors.click_marks.get() and not pose.paused:
+        for button,born in pose.click_started.items():
             phase=(now-born)/.23
             if not 0 <= phase < 1:
                 continue
@@ -1078,19 +1378,20 @@ def draw(now, mouse, pressed):
                     c.create_line(*segment,width=width,fill=color,capstyle=tk.ROUND,tags='click_mark')
     if play.kind=='paper':
         x,y=play.ball(now)
-        angle=(now-play.began)*7
+        angle=min(now-play.began,play.paper_duration())*7
         points=[]
         for i,r in enumerate((11,9,12,9,11,8,11)):
             a=angle+2*math.pi*i/7
             points.append((x+r*math.cos(a), y+r*math.sin(a)))
         c.create_polygon(*[v for point in points for v in point],fill='#fff4dd',outline='#71695c',width=1.3)
         c.create_line(*points[0],x-1,y+1,*points[3],fill='#b8ab96',width=1)
-    if floating_keys:
+    elif play.kind in ('bubble','wand'):
+        draw_air_toy(c,play,now)
+    if pose is live and floating_keys:
         draw_floating_keys(now,ref(390,575))
 
 def tick():
-    global previous,last_activity,last_mouse,mouse_active_until,last_key_time
-    global mouse_offset,mouse_work_until
+    global previous,last_mouse
     now=time.monotonic()
     point=wintypes.POINT()
     user32.GetCursorPos(ctypes.byref(point))
@@ -1101,71 +1402,77 @@ def tick():
     if show_keys.get():
         watched.update(range(96,106))
     pressed={k for k in watched if user32.GetAsyncKeyState(k)&0x8000}
-    if drag and drag['hit']:
+    if live.drag and live.drag['hit']:
         pressed.discard(1)
     fresh=pressed-previous
+    was_playing_toy = play.kind in TOYS
     playing=play.update(now,cursor,pressed,near_face)
-    block_mouse = near_face or play.hover or play.kind in ('paper','offer','tap','chin') or (
-        drag and (drag.get('chin') or drag.get('tap')))
-    if not paused and not block_mouse and last_mouse is not None and mouse!=last_mouse:
-        mouse_offset = move_mini_mouse(mouse_offset, mouse[0]-last_mouse[0], mouse[1]-last_mouse[1])
-    waking=not paused and now-last_activity>=18 and bool(fresh.intersection(key_positions))
-    if colors.click_marks.get() and not paused:
+    live.mouse_blocked=bool(near_face or play.near_neck(cursor) or playing or play.hover or
+                            play.kind in ('paper','offer','invite','tap','chin') or
+                            (live.drag and (live.drag.get('chin') or live.drag.get('tap'))))
+    mouse_moved=last_mouse is not None and mouse!=last_mouse
+    if not live.paused and not live.mouse_blocked and mouse_moved:
+        live.mouse_offset = move_mini_mouse(live.mouse_offset, mouse[0]-last_mouse[0], mouse[1]-last_mouse[1])
+    was_asleep=not live.paused and not was_playing_toy and now-live.last_activity>=SLEEP_AFTER
+    waking=was_asleep and bool(fresh.intersection(key_positions))
+    if was_asleep and not waking and not live.mouse_blocked and (mouse_moved or fresh & {1,2}):
+        live.expression,live.expression_start='yawn',now
+    if colors.click_marks.get() and not live.paused and not live.mouse_blocked:
         for button in fresh & {1,2}:
-            click_started[button]=now
-    if last_mouse is not None and mouse!=last_mouse or pressed & {1,2}:
-        mouse_active_until=now+2
-        mouse_work_until=now+.35
-    if playing or block_mouse:
-        mouse_active_until=mouse_work_until=0
+            live.click_started[button]=now
+    if mouse_moved or pressed & {1,2}:
+        live.mouse_active_until=now+2
+        live.mouse_work_until=now+.35
+    if live.mouse_blocked:
+        live.mouse_active_until=live.mouse_work_until=0
     if fresh-{1,2}:
-        last_key_time=now
-    if not paused:
+        live.last_key_time=now
+    if not live.paused:
         for code in pressed:
-            pressed_until[code]=now+.10
-    if pressed or previous or (last_mouse is not None and mouse!=last_mouse):
-        last_activity=now
-    if not paused:
-        for side,code in stroke_key.items():
+            live.pressed_until[code]=now+.10
+    if pressed or previous or mouse_moved or was_playing_toy:
+        live.last_activity=now
+    if not live.paused:
+        for side,code in live.stroke_key.items():
             if code is None:
                 continue
-            impact=key_contact[code]
+            impact=live.key_contact[code]
             if code in pressed:
-                last_key_time=now
+                live.last_key_time=now
             elif code not in pressed:
-                until[side]=min(until[side],max(now,impact+STROKE_TIME-CONTACT_TIME))
-        if now < mouse_work_until and now < until['left']:
-            if until['left'] >= until['right']:
-                targets['right']=targets['left']
-                until['right']=until['left']
-                stroke_origin['right']=paw_positions['right']
-                stroke_key['right']=stroke_key['left']
-                stroke_start['right']=stroke_start['left']
-                stroke_speed['right']=stroke_speed['left']
-            until['left']=0
-            stroke_key['left']=None
+                live.until[side]=min(live.until[side],max(now,impact+STROKE_TIME-CONTACT_TIME))
+        if now < live.mouse_work_until and now < live.until['left']:
+            if live.until['left'] >= live.until['right']:
+                live.targets['right']=live.targets['left']
+                live.until['right']=live.until['left']
+                live.stroke_origin['right']=live.paw_positions['right']
+                live.stroke_key['right']=live.stroke_key['left']
+                live.stroke_start['right']=live.stroke_start['left']
+                live.stroke_speed['right']=live.stroke_speed['left']
+            live.until['left']=0
+            live.stroke_key['left']=None
         for k in sorted(fresh-{1,2}):
             if show_keys.get() and 96<=k<=105:
                 add_floating_key(k,now)
             if k in key_positions:
                 position = key_positions[k]
-                side='left' if position[0]<194 and now>=mouse_work_until else 'right'
+                side='left' if position[0]<194 and now>=live.mouse_work_until else 'right'
                 if waking:
                     play.begin('stretch',now,1.45,'right' if side=='left' else 'left')
                     waking=False
-                old=stroke_key[side]
-                origin=paw_positions[side]
-                if old is not None and old!=k and key_contact[old]>now:
-                    key_contact[old]=now
-                    origin=(targets[side][0],targets[side][1]+5.5)
-                gap=now-stroke_start[side]
-                stroke_speed[side]=max(0,min(1,(.34-gap)/.22))
-                stroke_start[side]=now
-                targets[side]=position
-                stroke_origin[side]=origin
-                stroke_key[side]=k
-                until[side]=math.inf  # Release the paw when the physical key comes up.
-                key_contact[k]=now+CONTACT_TIME-.085*stroke_speed[side]
+                old=live.stroke_key[side]
+                origin=live.paw_positions[side]
+                if old is not None and old!=k and live.key_contact[old]>now:
+                    live.key_contact[old]=now
+                    origin=(live.targets[side][0],live.targets[side][1]+5.5)
+                gap=now-live.stroke_start[side]
+                live.stroke_speed[side]=max(0,min(1,(.34-gap)/.22))
+                live.stroke_start[side]=now
+                live.targets[side]=position
+                live.stroke_origin[side]=origin
+                live.stroke_key[side]=k
+                live.until[side]=math.inf  # Release the paw when the physical key comes up.
+                live.key_contact[k]=now+CONTACT_TIME-.085*live.stroke_speed[side]
                 if show_keys.get():
                     add_floating_key(k,now)
     previous=pressed
@@ -1174,13 +1481,19 @@ def tick():
     root.after(25,tick)
 
 def start_drag(e):
-    global drag
     hit=False
     point=(e.x/c.zoom,e.y/c.zoom)
     now=time.monotonic()
-    if not paused and play.kind=='offer' and math.dist(point,paw_positions[play.side])<20:
-        play.begin('tap',now,.32,play.side)
-        drag=dict(x=e.x_root,y=e.y_root,hit=True,moved=False,tap=True)
+    if play.kind in TOYS and play.kind!='box' and not live.paused:
+        live.drag=dict(hit=True,moved=False,toy=True)
+        return
+    if not live.paused and play.kind in ('offer','invite','tap') and math.dist(point,live.paw_positions[play.side])<20:
+        play.high_five(now)
+        live.drag=dict(x=e.x_root,y=e.y_root,hit=True,moved=False,tap=True)
+        return
+    drag=dict(x=e.x_root,y=e.y_root,wx=root.winfo_x(),wy=root.winfo_y(),moved=False)
+    if play.kind=='box':
+        live.drag=dict(drag,hit=True,box_point=point,box_entered=play.box_entered)
         return
     for item in reversed(c.find_overlapping(e.x,e.y,e.x,e.y)):
         tags=c.gettags(item)
@@ -1189,47 +1502,51 @@ def start_drag(e):
         hit=any(t in tags for t in ('pet_target','foreleg_left','foreleg_right'))
         break
     chin=abs(point[0]-play.chin[0])<28 and abs(point[1]-play.chin[1])<17
-    drag=dict(x=e.x_root,y=e.y_root,wx=root.winfo_x(),wy=root.winfo_y(),hit=hit,moved=False,chin=chin)
+    live.drag=dict(drag,hit=hit,chin=chin)
 
 def move_drag(e):
-    if drag and not drag.get('tap'):
-        dx,dy=e.x_root-drag['x'],e.y_root-drag['y']
-        if drag.get('chin'):
-            if not paused and max(abs(dx),abs(dy))>=3*c.zoom:
-                drag['rub']=True
+    if live.drag and not (live.drag.get('tap') or live.drag.get('toy')):
+        dx,dy=e.x_root-live.drag['x'],e.y_root-live.drag['y']
+        if live.drag.get('chin'):
+            if not live.paused and max(abs(dx),abs(dy))>=3*c.zoom:
+                live.drag['rub']=True
                 play.begin('chin',time.monotonic(),.55,'left')
             return
-        if drag['moved'] or max(abs(dx),abs(dy))>=5:
-            drag['moved']=True
+        if live.drag['moved'] or max(abs(dx),abs(dy))>=5:
+            live.drag['moved']=True
             if not colors.position_fixed.get():
-                root.geometry('+%d+%d'%(drag['wx']+dx,drag['wy']+dy))
+                root.geometry('+%d+%d'%(live.drag['wx']+dx,live.drag['wy']+dy))
 
 def end_drag(e):
-    global drag,pet_count,last_pet,expression,expression_start
-    gesture,drag=drag,None
-    if gesture and (gesture.get('rub') or gesture.get('tap')):
-        if gesture.get('rub') and not paused:
+    global pet_count,last_pet
+    gesture,live.drag=live.drag,None
+    if gesture and 'box_point' in gesture:
+        if not gesture['moved'] and play.kind=='box' and play.box_entered==gesture['box_entered']:
+            play.touch_box(time.monotonic(),gesture['box_point'])
+        pet_count=0
+        return
+    if gesture and (gesture.get('rub') or gesture.get('tap') or gesture.get('toy')):
+        if gesture.get('rub') and not live.paused:
             play.begin('chin',time.monotonic(),.5,'left')
         pet_count=0
         return
-    if not gesture or gesture['moved'] or not gesture['hit'] or paused:
+    if not gesture or gesture['moved'] or not gesture['hit'] or live.paused:
         pet_count=0
         return
     now=time.monotonic()
-    if expression=='annoyed' and now-expression_start<ANGER_DURATION:
+    if live.expression=='annoyed' and now-live.expression_start<ANGER_DURATION:
         return
     pet_count=pet_count+1 if now-last_pet<=.65 else 1
     last_pet=now
-    if 4 <= pet_count < 10 and expression=='yawn' and now-expression_start<1.55:
+    if 4 <= pet_count < 10 and live.expression=='yawn' and now-live.expression_start<1.55:
         return
-    expression={3:'yawn',10:'annoyed'}.get(pet_count,'squint')
-    expression_start=now
+    live.expression={3:'yawn',10:'annoyed'}.get(pet_count,'squint')
+    live.expression_start=now
     if pet_count==10:
         pet_count=0
 
 def toggle_pause():
-    global paused
-    paused=not paused
+    live.paused=not live.paused
     play.kind=''
 
 size_dialog = None
@@ -1250,9 +1567,9 @@ def resize_pet(value):
     colors.size_percent = percent
     c.zoom = percent / 100
     root.geometry('%dx%d+%d+%d' % (width,height,x,y))
-    label_cache.clear()
+    c.label_cache.clear()
     volume_cache.clear()
-    coat_overlay.clear()
+    c.coat_overlay.clear()
     colors.save()
 
 def percent_dialog(dialog, label, low, high, value, default, on_change):
@@ -1293,9 +1610,9 @@ def set_brightness(value):
     if percent != colors.brightness_percent:
         colors.brightness_percent = percent
         c.set_brightness(percent)
-        label_cache.clear()
+        c.label_cache.clear()
         volume_cache.clear()
-        coat_overlay.clear()
+        c.coat_overlay.clear()
         colors.save()
 
 def open_brightness():
@@ -1303,7 +1620,58 @@ def open_brightness():
     brightness_dialog = percent_dialog(brightness_dialog, '明暗度', 50, 150,
                                        colors.brightness_percent, 100, set_brightness)
 
-painter = CoatPainter(root, c, colors)
+def make_pose_preview(parent,editor):
+    panel=ttk.LabelFrame(parent,text='动作预览')
+    panel.pack(fill='x')
+    zoom=min(.7,parent.winfo_screenheight()/1520)
+    canvas=PetCanvas(panel,width=round(W*zoom),height=round(H*zoom),bg='#e6e4df',highlightthickness=0)
+    canvas.zoom=zoom
+    canvas.set_brightness(colors.brightness_percent)
+    canvas.coat_overlay={}
+    canvas.label_cache={}
+    canvas.pack()
+    coat=CoatPainter(root,canvas,colors)
+    selected=tk.StringVar(panel,value='坐着')
+
+    def redraw():
+        # Render the unsaved paint at a representative instant of the real pose.
+        if coat.ids is not editor.ids:
+            coat.ids,coat.body_ids=editor.ids,editor.body_ids
+            coat.paint_area,coat.body_area=editor.paint_area,editor.body_area
+            coat.forelegs=editor.forelegs
+        coat.set_artwork({'base':editor.base},editor.paint,editor.underpaint)
+        now=10.
+        pose=PetPose(last_activity=now)
+        action=CatPlay()
+        pressed=set()
+        mode=selected.get()
+        if mode=='打字':
+            pressed={ord('A'),ord('P')}
+            pose.body_follow=(0,30)
+            for code in pressed:
+                x,y=key_positions[code]
+                side='left' if x<194 else 'right'
+                pose.stroke_key[side]=code
+                pose.targets[side]=(x,y)
+                pose.until[side]=now+1
+                pose.key_contact[code]=now
+        elif mode=='握鼠标':
+            pose.mouse_work_until=now+1
+            pose.mouse_lean=1.
+            pose.body_follow=(0,28)
+        elif mode=='伸懒腰':
+            action.begin('stretch',now-.65,1.45,'right')
+        mouse=(root.winfo_screenwidth()/2,canvas.winfo_rooty()+100*canvas.zoom)
+        render_scene(canvas,coat,action,pose,now,mouse,pressed)
+
+    controls=ttk.Frame(panel)
+    controls.pack(pady=4)
+    for mode in ('坐着','打字','握鼠标','伸懒腰'):
+        ttk.Radiobutton(controls,text=mode,variable=selected,value=mode,command=redraw).pack(side='left')
+    return redraw
+
+painter = CoatPainter(root, c, colors, make_pose_preview)
+colors.short_tail.trace_add('write',lambda *_:painter.set_tail_shape())
 colors.open_painter = painter.open
 colors.drawing_thumbnail = painter.thumbnail
 menu=tk.Menu(root,tearoff=False)
@@ -1318,6 +1686,8 @@ style_menu.add_radiobutton(label='带底色的小键帽',variable=colors.floatin
 floating_menu.add_cascade(label='浮字样式',menu=style_menu)
 colors.add_theme(floating_menu,'浮字按键提示')
 menu.add_command(label='丢个纸团',command=play.toss)
+for label,toy in [('吹个泡泡','bubble'),('晃晃逗猫棒','wand'),('丢个纸箱','box')]:
+    menu.add_command(label=label,command=lambda toy=toy:play.start_toy(toy,time.monotonic()))
 menu.add_checkbutton(label='固定/自由小猫',variable=colors.position_fixed,command=colors.save)
 menu.add_command(label='暂停 / 继续动作',command=toggle_pause)
 menu.add_command(label='退出小猫VCC',command=root.destroy)
