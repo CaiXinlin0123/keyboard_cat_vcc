@@ -314,8 +314,19 @@ class CatColors:
             name.delete(0,'end')
             name.insert(0,item['name'])
             refresh()
-        ttk.Button(naming,text='保存方案',command=store).pack(side='right')
+        save_button=ttk.Button(naming,text='保存方案',command=store)
+        save_button.pack(side='right')
         history.bind('<<ComboboxSelected>>',restore)
+        def reset_mixed():
+            slots=palette_slots(part,'mixed')
+            previous={slot:palette[slot] for slot in slots}
+            palette.update({slot:slot for slot in slots})
+            if not self.save():
+                palette.update(previous)
+                return
+            history.set('')
+            name.delete(0,'end')
+            refresh()
         def choose(key):
             color=pick_rgb(window,palette[key],[])
             if color is not None:
@@ -330,6 +341,9 @@ class CatColors:
             for child in rows.winfo_children():
                 child.destroy()
             keyboard=part=='键盘'
+            mixed=mode.get()=='mixed'
+            is_default=mixed and all(palette[slot].lower()==slot for slot in palette_slots(part,'mixed'))
+            save_button.configure(state='disabled' if is_default else 'normal')
             entries=[(palette_key(KEY_BASE),'底色（普通键和键盘外壳）')] if keyboard else []
             if mouse:
                 entries.append((part,'鼠标颜色'))
@@ -348,6 +362,8 @@ class CatColors:
                                  fg='black' if sum(bytes.fromhex(swatch[1:]))>380 else 'white',
                                  command=lambda k=key:choose(k))
                 button.grid(row=i,column=1,sticky='e')
+            if mixed:
+                ttk.Button(rows,text='默认',command=reset_mixed).grid(row=len(entries),column=1,sticky='e',pady=(5,0))
         def switch():
             palette['mode']=mode.get()
             self.save()

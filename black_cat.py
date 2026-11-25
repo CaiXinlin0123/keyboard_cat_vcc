@@ -2,6 +2,7 @@ import tkinter as tk
 from tkinter import ttk
 from coat_painter import BODY, HEAD, TAIL, BOB_X, BOB_Y, BOB_RADIUS, CoatPainter, leg_projection, heel_outline, coat_outline
 from cat_colors import CatColors, PRESETS, KEY_BASE, KEY_ACCENTS
+from cat_updates import UpdateReminder
 import ctypes
 from ctypes import wintypes
 import time
@@ -13,6 +14,8 @@ from functools import lru_cache
 from dataclasses import dataclass, field
 from collections import deque
 import os
+import subprocess
+import sys
 from PIL import Image, ImageDraw, ImageFont, ImageTk, ImageFilter, ImageChops
 
 parser = argparse.ArgumentParser()
@@ -565,6 +568,21 @@ class CatPlay:
             return True
         return False
 
+    def wand_motion(self, now):
+        if self.kind != 'wand':
+            return 0., 0., 0.
+        wiggle = 0.
+        if self.anchor is not None:
+            until_swat = max(self.still_since+.7, self.swat_start+.85)-now
+            envelope = ramp((.42-until_swat)/.13)*ramp(until_swat/.06)
+            wiggle = envelope*math.sin(until_swat*math.tau*7)
+        # Lock the pounce to the feather's position at takeoff, even if it dodges.
+        age = now-self.swat_start
+        reach = ramp(age/.18)*ramp((.50-age)/.28)
+        sideways = max(-1., min(1., (self.aim[0]-175)/76))
+        forward = max(0., min(1., (self.aim[1]-170)/125))
+        return 24*sideways*reach, (4+12*(1-abs(sideways))+8*forward)*reach, wiggle
+
     def toy_paw(self, side, rest, now):
         if self.kind=='paper':
             t = (now-self.began)/self.paper_duration()
@@ -766,16 +784,17 @@ def draw_air_toy(canvas, play, now):
                               outline=pale(tint,.83),width=2,tags='toy_bubble')
     elif play.kind=='wand':
         # The feather tip follows the pointer; the shaft trails off to the side.
-        sign = 1 if x<W-64 else -1
-        sway = (5 if play.phase=='caught' else 1.5)*math.sin((now-play.began)*22)
-        tx,ty = x+sign*(12+sway),y-12
-        canvas.create_line(x+sign*50,y-44,x+sign*26,y-31,fill='#8f603e',width=3,
+        sign = 1 if x<W-87 else -1
+        up = -1 if y>76 else 1
+        sway = (7 if play.phase=='caught' else 2)*math.sin((now-play.began)*22)
+        tx,ty = x+sign*(19+sway),y+up*20
+        canvas.create_line(x+sign*80,y+up*70,x+sign*42,y+up*50,fill='#8f603e',width=4.5,
                            capstyle=tk.ROUND,tags='toy_wand')
-        canvas.create_line(x+sign*26,y-31,tx+sign*8,ty-1,tx,ty,fill='#9e837d',
-                           smooth=True,width=1.5,tags='toy_wand')
-        canvas.create_polygon(tx,ty,tx-sign*11,ty-4,x-sign*5,y+6,x+sign*9,y+1,tx,ty,
+        canvas.create_line(x+sign*42,y+up*50,tx+sign*13,ty+up*2,tx,ty,fill='#9e837d',
+                           smooth=True,width=2,tags='toy_wand')
+        canvas.create_polygon(tx,ty,tx-sign*18,ty+up*6,x-sign*8,y-up*10,x+sign*15,y-up*2,tx,ty,
                               smooth=True,fill='#e98e94',outline='#975662',tags='toy_wand')
-        canvas.create_line(x-sign*3,y+3,tx,ty,fill='#ffe1c9',width=1.5,tags='toy_wand')
+        canvas.create_line(x-sign*5,y-up*5,tx,ty,fill='#ffe1c9',width=2,tags='toy_wand')
 
 def render_scene(c,painter,play,pose,now,mouse,pressed):
     c.delete('all')
@@ -860,6 +879,7 @@ def render_scene(c,painter,play,pose,now,mouse,pressed):
     else:
         look_direction=2*mouse[0]/max(1,root.winfo_screenwidth())-1
     pose.look_turn += .36*((0 if idle or pose.paused else max(-1,min(1,look_direction)))-pose.look_turn)
+    pounce_x,pounce_y,hunt_wiggle = play.wand_motion(now)
     def ref(x,y,tilt=True):
         x += (x-390)*.7*breath
         y += (y-852)*breath
@@ -872,6 +892,11 @@ def render_scene(c,painter,play,pose,now,mouse,pressed):
             y += (15+.47*min(470,max(0,852-y)))*stretch
         px = CAT_ORIGIN_X+(x-208*torso_lean*weight)*.34 + pose.body_follow[0]*weight
         py = 15+y*.34 + pose.body_follow[1]*weight
+        if play.kind=='wand':
+            # The hips wiggle under a steady gaze. The chest leads on takeoff.
+            hip = max(0., min(1., (y-300)/450))
+            px += pounce_x*(1-.42*hip) + 3.2*hunt_wiggle*(.15+.85*hip)
+            py += pounce_y*(1-.55*hip)
         if boxed:
             px += (175-px)*.34*tuck+peek
             py += (191-.61*py)*tuck
@@ -963,6 +988,10 @@ def render_scene(c,painter,play,pose,now,mouse,pressed):
         tip = (x-root_x)/(TAIL[-1][0]-root_x)
         px += 2*bend
         py -= bend+32*stretch*tip*tip
+        if hunt_wiggle:
+            tail_flex = max(0., min(1., tip))
+            px += 8*tail_flex*hunt_wiggle
+            py -= 10*tail_flex*hunt_wiggle
         if tail_fold:
             # Draw the tail in behind the hip before the cat ducks. The head
             # can peek over either rim while the tail stays inside the box.
@@ -1690,14 +1719,81 @@ for label,toy in [('吹个泡泡','bubble'),('晃晃逗猫棒','wand'),('丢个�
     menu.add_command(label=label,command=lambda toy=toy:play.start_toy(toy,time.monotonic()))
 menu.add_checkbutton(label='固定/自由小猫',variable=colors.position_fixed,command=colors.save)
 menu.add_command(label='暂停 / 继续动作',command=toggle_pause)
+updates = UpdateReminder(root, colors.path.parent)
+menu.add_command(label='检查更新…',command=lambda:updates.check(manual=True))
 menu.add_command(label='退出小猫VCC',command=root.destroy)
 c.bind('<ButtonPress-1>',start_drag)
 c.bind('<B1-Motion>',move_drag)
 c.bind('<ButtonRelease-1>',end_drag)
 c.bind('<Button-3>',lambda e:menu.tk_popup(e.x_root,e.y_root))
 root.bind('<Escape>',lambda e:root.destroy())
+
+def setup_windows_shortcuts():
+    """Register this copy for the current user after its first successful start."""
+    script = Path(__file__).resolve()
+    launcher = script.parent.parent / '启动小猫.bat'
+    if script.parent.name == 'runtime' and launcher.is_file():
+        target, arguments = launcher, ''
+    else:
+        target = Path(sys.executable).with_name('pythonw.exe')
+        if not target.is_file():
+            target = Path(sys.executable)
+        arguments = '-B "' + str(script) + '"'
+
+    stamp = colors.path.parent / 'shortcut-location.txt'
+    location = str(target) + '\n' + arguments
+    icon = script.with_name('calico-box.ico')
+    icon_location = str(icon) + ',0' if icon.is_file() else ''
+    if icon_location:
+        location += '\n' + icon_location
+    try:
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        # Pass paths as data, including paths with quotes, spaces or ampersands.
+        env = dict(os.environ, VCC_LINK_TARGET=str(target), VCC_LINK_ARGS=arguments,
+                   VCC_LINK_DIR=str(launcher.parent if target==launcher else script.parent),
+                   VCC_LINK_STAMP=str(stamp), VCC_LINK_LOCATION=location,
+                   VCC_LINK_ICON=icon_location)
+        command = r"""
+$ErrorActionPreference = 'Stop'
+$shell = New-Object -ComObject WScript.Shell
+$name = '小猫 VCC.lnk'
+$description = '小猫 VCC · 键盘伙伴'
+$wasRegistered = [IO.File]::Exists($env:VCC_LINK_STAMP)
+foreach ($folder in 'Programs', 'DesktopDirectory') {
+    $dir = [Environment]::GetFolderPath($folder, 'Create')
+    $path = [IO.Path]::Combine($dir, $name)
+    if ([string]::IsNullOrEmpty($dir)) { throw "Missing folder: $folder" }
+    $exists = [IO.File]::Exists($path)
+    if ($wasRegistered -and !$exists) { continue } # Respect a deleted shortcut.
+    $link = $shell.CreateShortcut($path)
+    if ($exists -and $link.Description -ne $description) { continue }
+    if ($exists -and $link.TargetPath -eq $env:VCC_LINK_TARGET -and
+        [string]$link.Arguments -eq [string]$env:VCC_LINK_ARGS -and
+        $link.WorkingDirectory -eq $env:VCC_LINK_DIR -and
+        (!$env:VCC_LINK_ICON -or $link.IconLocation -eq $env:VCC_LINK_ICON)) { continue }
+    $link.TargetPath = $env:VCC_LINK_TARGET
+    $link.Arguments = [string]$env:VCC_LINK_ARGS
+    $link.WorkingDirectory = $env:VCC_LINK_DIR
+    $link.Description = $description
+    if ($env:VCC_LINK_ICON) { $link.IconLocation = $env:VCC_LINK_ICON }
+    $link.Save()
+}
+if (!$wasRegistered -or [IO.File]::ReadAllText($env:VCC_LINK_STAMP) -cne $env:VCC_LINK_LOCATION) {
+    [IO.File]::WriteAllText($env:VCC_LINK_STAMP, $env:VCC_LINK_LOCATION)
+}
+"""
+        powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        subprocess.Popen([str(powershell), '-NoProfile', '-NonInteractive', '-Command', command],
+                         env=env, creationflags=subprocess.CREATE_NO_WINDOW)
+    except (OSError, UnicodeError):
+        # A read-only profile or an unavailable shell should not prevent play.
+        pass
+
 tick()
 if args.smoke_test:
     root.after(1200,root.destroy)
+elif __name__ == '__main__':
+    root.after_idle(setup_windows_shortcuts)
+    root.after(5000,updates.daily)
 root.mainloop()
 
