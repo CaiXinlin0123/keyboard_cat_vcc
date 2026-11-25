@@ -33,6 +33,10 @@ def pixel(x,y):
     return ((x-140)/2,(y-45)/2)
 
 
+# The tail makes the canvas wider on the right. Align guides and strokes to the torso.
+MIRROR_X = int(pixel(390,0)[0])
+
+
 def reference(u,v):
     return (140+2*u,45+2*v)
 
@@ -282,6 +286,10 @@ class CoatPainter:
         self.preview_item=self.board.create_image(0,0,anchor='nw')
         self.guide_photo=ImageTk.PhotoImage(forepaw_guide(self.ids))
         self.guide_item=self.board.create_image(0,0,anchor='nw',image=self.guide_photo)
+        for color,dash in (('#fafafa',()),('#565656',(4,4))):
+            self.board.create_line(MIRROR_X,0,MIRROR_X,SIZE[1],fill=color,dash=dash,
+                                   tags='mirror_axis',state='hidden')
+        self.show_axis=tk.BooleanVar(self.window,value=False)
         self.show_forepaws=tk.BooleanVar(self.window,value=True)
         modes=ttk.Frame(panel)
         modes.pack(fill='x',pady=(6,0))
@@ -296,6 +304,9 @@ class CoatPainter:
         ttk.Checkbutton(view,text='显示前腿',variable=self.show_legs,command=self.refresh).pack(side='left')
         self.guide_toggle=ttk.Checkbutton(view,text='前脚参考线',variable=self.show_forepaws,command=self.refresh)
         self.guide_toggle.pack(side='left')
+        ttk.Checkbutton(view,text='中轴辅助线',variable=self.show_axis,
+                        command=lambda:self.board.itemconfigure('mirror_axis',
+                            state='normal' if self.show_axis.get() else 'hidden')).pack(side='right')
         tools=ttk.Frame(panel)
         tools.pack(fill='x',pady=6)
         self.ink='#db8845'
@@ -444,11 +455,9 @@ class CoatPainter:
         brush.line((self.last,(x,y)),fill=255,width=2*r)
         brush.ellipse((x-r,y-r,x+r,y+r),fill=255)
         if self.symmetric.get():
-            # The tail extends past the torso. Mirror around the cat's midline.
-            axis=int(pixel(390,0)[0])
             flipped=mask.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
             mirrored=Image.new('L',SIZE)
-            mirrored.paste(flipped,(2*axis-(SIZE[0]-1),0))
+            mirrored.paste(flipped,(2*MIRROR_X-(SIZE[0]-1),0))
             mask=ImageChops.lighter(mask,mirrored)
         color='#fe00ff' if self.ink=='#ff00ff' else self.ink
         ink=(0,0,0,0) if self.mode.get()=='erase' else color

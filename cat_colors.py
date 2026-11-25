@@ -78,8 +78,13 @@ class CatColors:
         self.open_painter = None
         self.drawing_thumbnail = None
         self.menu_thumbnails = []
+        self.position_fixed = tk.BooleanVar(root, value=data.get('position_fixed') is True)
         size = data.get('size_percent')
         self.size_percent = size if type(size) is int and 50 <= size <= 175 else 100
+        transparency = data.get('transparency_percent')
+        self.transparency_percent = transparency if type(transparency) is int and 0 <= transparency <= 90 else 0
+        brightness = data.get('brightness_percent')
+        self.brightness_percent = brightness if type(brightness) is int and 50 <= brightness <= 150 else 100
         floating_style = data.get('floating_style')
         self.floating_style = tk.StringVar(root, value=floating_style if floating_style in
                                            ('bubble','text','black','white','custom','keycap') else 'black')
@@ -175,6 +180,9 @@ class CatColors:
         data = {k: {'color': v, 'history': self.history[k]} for k,v in self.current.items()}
         data['floating_style'] = self.floating_style.get()
         data['size_percent'] = self.size_percent
+        data['position_fixed'] = self.position_fixed.get()
+        data['transparency_percent'] = self.transparency_percent
+        data['brightness_percent'] = self.brightness_percent
         data['drawings'] = self.drawings
         data['using_drawing'] = self.using_drawing
         data['floating_ink'] = self.floating_ink
@@ -202,7 +210,7 @@ class CatColors:
             self.floating_style.set('custom')
             self.save()
 
-    def attach(self, menu, open_size=None):
+    def attach(self, menu, open_size=None, open_transparency=None, open_brightness=None):
         custom = tk.Menu(menu, tearoff=False)
         menu.add_cascade(label='自定义', menu=custom)
         for part in PRESETS:
@@ -221,8 +229,13 @@ class CatColors:
         floating = tk.Menu(custom, tearoff=False)
         custom.add_cascade(label='浮字按键提示', menu=floating)
         floating.add_command(label='自定义绘制',command=lambda:self.edit_palette('浮字按键提示'))
-        if open_size is not None:
-            custom.add_command(label='小猫大小…', command=open_size)
+        if any((open_size, open_transparency, open_brightness)):
+            settings = tk.Menu(custom, tearoff=False)
+            custom.add_cascade(label='小猫设置', menu=settings)
+            for label, action in (('小猫大小…', open_size), ('小猫透明度…', open_transparency),
+                                  ('小猫明暗度…', open_brightness)):
+                if action is not None:
+                    settings.add_command(label=label, command=action)
         return floating
 
     def palette_color(self,part,slot):
@@ -403,8 +416,8 @@ class CatColors:
             sub.add_command(label='自定义绘制',command=lambda:self.edit_palette(part))
             self.add_theme(sub, part)
             sub.add_checkbutton(label='点击拟声线',variable=self.click_marks,command=self.save)
-            sub.add_separator()
-        sub.add_command(label='自定义 RGB…', command=choose)
+        else:
+            sub.add_command(label='自定义绘制' if part == '眼睛' else '自定义 RGB…', command=choose)
         sub.add_separator()
         sub.add_command(label='最近使用的自定义颜色', state='disabled')
         for color in self.history[part]:
