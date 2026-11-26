@@ -9,7 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-VERSION = '1.4.1'
+VERSION = '1.4.2'
 REPOSITORY = 'https://github.com/CaiXinlin0123/keyboard_cat_vcc'
 WINDOWS_PACKAGE = 'keyboard-cat-windows-x64.zip'
 DAY_MS = 24 * 60 * 60 * 1000

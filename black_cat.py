@@ -38,7 +38,11 @@ root.attributes('-alpha', 1 - colors.transparency_percent / 100)
 
 class PetCanvas(tk.Canvas):
     """Draw in the original pose coordinates at the selected display size."""
+    keyboard_style = None
+    keyboard_tags = ()
+
     def set_brightness(self, percent):
+        self.keyboard_style = None
         # Darken towards black or lift towards white, retaining detail at both ends.
         change = (percent - 100) / 100
         self.tone = [round(i + change * (255-i if change > 0 else i)) for i in range(256)] if change else None
@@ -50,6 +54,8 @@ class PetCanvas(tk.Canvas):
         return '#%02x%02x%02x' % tuple(self.tone[channel // 257] for channel in rgb)
 
     def _create(self, item_type, args, options):
+        if self.keyboard_tags:
+            options['tags'] = self.keyboard_tags
         if self.tone is not None:
             for key in ('fill', 'outline'):
                 if options.get(key):
@@ -796,8 +802,65 @@ def draw_air_toy(canvas, play, now):
                               smooth=True,fill='#e98e94',outline='#975662',tags='toy_wand')
         canvas.create_line(x-sign*5,y-up*5,tx,ty,fill='#ffe1c9',width=2,tags='toy_wand')
 
+def draw_keyboard(c, dark, pose, now, pressed):
+    cap_colors = {key: colors.palette_color('键盘', key) for key in (white,) + KEY_ACCENTS}
+    base_color = cap_colors[white]
+    keyboard_labels = colors.keyboard_labels.get()
+    style = (c.zoom, dark, keyboard_labels, tuple(cap_colors.values()))
+    if c.keyboard_style != style:
+        c.delete('keyboard_layer')
+        c.keyboard_tags = ('keyboard_layer',)
+        try:
+            top=board_rect(69,292,252,95)
+            bottom=[(x,y+10) for x,y in top]
+            if base_color!=white:
+                shell=dark_color(base_color) if dark else base_color
+                front,side,edge,plate,rim,well=[shade(shell,n) for n in (.68,.78,.55,.94,1.08,.81)]
+            elif dark:
+                front,side,edge,plate,rim,well=('#24292e','#333a40','#121518','#22262a','#4b5258','#101215')
+            else:
+                front,side,edge,plate,rim,well=('#9ca9b0','#b2bec3','#77868e','#e9eeee','#fafdfd','#c4ced0')
+            board_layer=quad(c,[top[0],top[1],bottom[1],bottom[0]],front,edge)
+            quad(c,[top[0],top[3],bottom[3],bottom[0]],side,edge)
+            quad(c,top,plate,rim)
+            quad(c,board_rect(73,296,244,87),well)
+            if dark:
+                cap_colors={key:dark_color(value) for key,value in cap_colors.items()}
+            for x,y,w,h,label,code,key_color in sorted(keys,key=lambda k:project(k[0],k[1])[1]):
+                c.keyboard_tags = ('keyboard_layer',)
+                quad(c,board_rect(x-.5,y-.5,w+1,h+1),'#383d42' if dark else '#7e8a90')
+                for down in (False, True):
+                    c.keyboard_tags = ('keyboard_layer', f'cap_{code}_{int(down)}', 'cap_down' if down else 'cap_up')
+                    height = .5 if down else 6
+                    color=cap_colors[key_color]
+                    color = shade(color,.93) if down else color
+                    base=board_rect(x,y,w,h)
+                    cap=board_rect(x+.5,y+.5,w-1,h-1,height)
+                    quad(c,[cap[0],cap[1],base[1],base[0]],shade(color,.72))
+                    quad(c,[cap[0],cap[3],base[3],base[0]],shade(color,.83))
+                    quad(c,cap,color,shade(color,.86))
+                    tx,ty=project(x+w/2,y+h/2,height)
+                    if keyboard_labels:
+                        c.create_image(tx,ty,image=key_label(c,label,x+w/2,y+h/2,dark))
+        finally:
+            c.keyboard_tags = ()
+        c.itemconfigure('cap_down', state='hidden')
+        c.keyboard_board = board_layer
+        c.down_keys = set()
+        c.keyboard_style = style
+    down_keys = {code for code,impact in pose.key_contact.items()
+                 if not pose.paused and impact <= now and (code in pressed or now < impact+.075)}
+    for code in down_keys ^ c.down_keys:
+        down = int(code in down_keys)
+        c.itemconfigure(f'cap_{code}_{1-down}', state='hidden')
+        c.itemconfigure(f'cap_{code}_{down}', state='normal')
+    c.down_keys = down_keys
+    c.tag_raise('keyboard_layer')
+    return c.keyboard_board
+
+
 def render_scene(c,painter,play,pose,now,mouse,pressed):
-    c.delete('all')
+    c.delete('!keyboard_layer')
     boxed = play.kind=='box'
     tuck, peek = play.box_pose(now) if boxed else (0., 0.)
     tail_fold = play.box_tail_fold(now) if boxed else 0.
@@ -1202,45 +1265,12 @@ def render_scene(c,painter,play,pose,now,mouse,pressed):
             pts=[face(innerx,325+i*19,24),face((innerx+outerx)/2,324+i*25,16),face(outerx,334+i*32,8)]
             c.create_line(*[n for pt in pts for n in pt],fill=whisker,width=1,smooth=True)
     # Pastel keyboard drawn from the supplied reference, kept crisp at pet size.
-    for item in c.find_all():
+    for item in c.find_withtag('!keyboard_layer'):
         if c.type(item)!='image' and 'box_back' not in c.gettags(item):
             c.addtag_withtag('pet_target',item)
     if box_visible:
         draw_box(c,True)
-    top=board_rect(69,292,252,95)
-    bottom=[(x,y+10) for x,y in top]
-    base_color=colors.palette_color('键盘',white)
-    if base_color!=white:
-        shell=dark_color(base_color) if dark else base_color
-        front,side,edge,plate,rim,well=[shade(shell,n) for n in (.68,.78,.55,.94,1.08,.81)]
-    elif dark:
-        front,side,edge,plate,rim,well=('#24292e','#333a40','#121518','#22262a','#4b5258','#101215')
-    else:
-        front,side,edge,plate,rim,well=('#9ca9b0','#b2bec3','#77868e','#e9eeee','#fafdfd','#c4ced0')
-    board_layer=quad(c,[top[0],top[1],bottom[1],bottom[0]],front,edge)
-    quad(c,[top[0],top[3],bottom[3],bottom[0]],side,edge)
-    quad(c,top,plate,rim)
-    quad(c,board_rect(73,296,244,87),well)
-    cap_colors={key:colors.palette_color('键盘',key) for key in (white,)+KEY_ACCENTS}
-    if dark:
-        cap_colors={key:dark_color(value) for key,value in cap_colors.items()}
-    keyboard_labels = colors.keyboard_labels.get()
-    for x,y,w,h,label,code,color in sorted(keys,key=lambda k:project(k[0],k[1])[1]):
-        impact = pose.key_contact.get(code, -1)
-        down = (not pose.paused and code in pose.key_contact and impact <= now
-                and (code in pressed or now < impact+.075))
-        height = .5 if down else 6
-        color=cap_colors[color]
-        color = shade(color,.93) if down else color
-        base=board_rect(x,y,w,h)
-        quad(c,board_rect(x-.5,y-.5,w+1,h+1),'#383d42' if dark else '#7e8a90')
-        cap=board_rect(x+.5,y+.5,w-1,h-1,height)
-        quad(c,[cap[0],cap[1],base[1],base[0]],shade(color,.72))
-        quad(c,[cap[0],cap[3],base[3],base[0]],shade(color,.83))
-        quad(c,cap,color,shade(color,.86))
-        tx,ty=project(x+w/2,y+h/2,height)
-        if keyboard_labels:
-            c.create_image(tx,ty,image=key_label(c,label,x+w/2,y+h/2,dark))
+    board_layer=draw_keyboard(c, dark, pose, now, pressed)
     # Mouse in the cat's operating direction: palm end near the cat,
     # front buttons farther away, towards the viewer's lower left.
     def mp(x,y,z=0):
